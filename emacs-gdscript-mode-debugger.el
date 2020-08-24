@@ -34,7 +34,7 @@
   '((:data-length   u32r)
     (:string-data str (:data-length))
     (align 4)
-    (eval (message "IN A STRING %s" last))))
+    (eval (message "IN A STRING %s %s" last bindat-idx))))
 
 (defvar array-spec
   '((:array-length   u32r)
@@ -53,7 +53,7 @@
 
 (defvar godot-data-bindat-spec
   '((:data-type     u32r)
-    ;;(eval (message "2222:data-type %s" (bindat-get-field struct :data-type)))
+    (eval (message "2222:data-type %s" last))
     (union (:data-type)
            (1 (struct boolean-spec))
            (2 (struct integer-spec))
@@ -61,44 +61,30 @@
            (19 (struct array-spec))
            (t (struct my-spec)))))
 
+(defvar previous-packet-data nil)
+
 (defvar packet-bindat-spec
-  '((:packet-length u32r)
+  '((eval (message "CALLED packet-bindat-spec"))
+    (:packet-length u32r)
     (eval (message "Packet size %s, index %s" last bindat-idx))
-    (struct godot-data-bindat-spec)
-    ;; (:data-type     u32r)
-    ;; (eval (message ":data-type %s" (bindat-get-field struct :data-type)))
-    ;; (union (:data-type)
-    ;;        (1 (struct boolean-spec))
-    ;;        (2 (struct integer-spec))
-    ;;        (4 (struct string-spec))
-    ;;        (19 (struct array-spec))
-    ;;        (t (struct my-spec)))
-    ;;(fill (:packet-length))
-    ;;(eval (message "CXXXXX %s" bindat-idx))
-    ;;(:packet-data   vec (:packet-length))
-    ;; (eval (let ((plength (bindat-get-field struct :packet-length))
-    ;;             ;; (pdata (bindat-get-field struct :packet-data))
-    ;;             )
-    ;;         (message "Packet length: %s, packet data" plength)))
-    ;; (:packet2-length u32r)
-    ;; (:data2-type     u32r)
-    ;; (:data2-data     u32r)
-    ;; (:packet3-length u32r)
-    ;; (:data3-type     u32r)
-    ;; (eval
-    ;;  (message ":packet2-length %s :data2-type %s :data2-data %s"
-    ;;           (bindat-get-field struct :packet2-length)
-    ;;           (bindat-get-field struct :data2-type)
-    ;;           (bindat-get-field struct :data2-data)))
-    ;; (eval
-    ;;  (message ":packet3-length %s :data3-type %s"
-    ;;           (bindat-get-field struct :packet3-length)
-    ;;           (bindat-get-field struct :data3-type)))
-    (eval (when (< bindat-idx 5000)
-            (message "LOOOP bindat-idx %s %s" bindat-idx (length bindat-raw))
-            (when (eq bindat-idx (length bindat-raw))
-              (message "Uos, we need next data"))
-            (bindat-unpack packet-bindat-spec bindat-raw bindat-idx)))))
+    (eval
+     ;; Let's check if we have enough data for current packet
+     (if (> (+ bindat-idx last) (length bindat-raw))
+         (progn
+           (setq previous-packet-data (substring bindat-raw bindat-idx (length bindat-raw)))
+           (message " ------------ Ups, we need next data AAAA:")
+           nil)
+       (progn
+         (message "BEFORE Packet size %s, index %s" last bindat-idx)
+         ;;(struct godot-data-bindat-spec)
+         (bindat-unpack godot-data-bindat-spec bindat-raw bindat-idx)
+         (message "AFTER  Packet size %s, index %s" last bindat-idx)
+         (eval
+          ;; Let's check if we have any data left
+          (if (eq (+ last bindat-idx) (length bindat-raw))
+              (progn (message " ----------- Ups, we need next data BBBB")
+                     nil)
+            (bindat-unpack packet-bindat-spec bindat-raw (+ last bindat-idx)))))))))
 
 ;; (defvar packet-type-bindat-spec
 ;;   '((:data-type     u32r)
@@ -119,25 +105,33 @@
   "Gets invoked whenever the server sends data to the client."
   (message "(DATA received): %s" (length content))
 
-  (when first-only
-    (setq first-only nil)
-    (message "(received): %s" (length content))
-    (let* (
-           (packet (bindat-unpack packet-bindat-spec content))
+  ;;(message "(stringp content): %s" (stringp content))
+  ;;(message "(type-of content): %s" (type-of content))
 
-         ;;(packet-x (bindat-unpack packet-type-bindat-spec (bindat-get-field packet :packet-data)))
-         ;;(length (bindat-get-field what 'data-length))
-         ;;(data (bindat-get-field packet-x :string-data))
-         ;;(offset 12)
-           )
-      ;;(eval (message "DXXXXX %s" bindat-idx))
-    ;;(message "DATA: %s" data)
-    ;;(message "(bindat-get-field what :data-type): %s" (bindat-get-field what 'data-type))
-    ;;(read-type type length offset content data)
-    ;;(message "process: %s" process)
-    ;;(message "packet-x %s" packet-x)
-    ;;(message "what2 %s" what2)
-      ))
+  (let ((content-2 (concat previous-packet-data content)))
+    (bindat-unpack packet-bindat-spec content-2))
+
+
+
+  ;; (when first-only
+  ;;   (setq first-only nil)
+  ;;   (message "(received): %s" (length content))
+  ;;   (let* (
+  ;;
+
+  ;;        ;;(packet-x (bindat-unpack packet-type-bindat-spec (bindat-get-field packet :packet-data)))
+  ;;        ;;(length (bindat-get-field what 'data-length))
+  ;;        ;;(data (bindat-get-field packet-x :string-data))
+  ;;        ;;(offset 12)
+  ;;          )
+  ;;     ;;(eval (message "DXXXXX %s" bindat-idx))
+  ;;   ;;(message "DATA: %s" data)
+  ;;   ;;(message "(bindat-get-field what :data-type): %s" (bindat-get-field what 'data-type))
+  ;;   ;;(read-type type length offset content data)
+  ;;   ;;(message "process: %s" process)
+  ;;   ;;(message "packet-x %s" packet-x)
+  ;;   ;;(message "what2 %s" what2)
+  ;;     ))
   (message "(DATA processed): %s" (length content))
   )
 
@@ -147,6 +141,7 @@
   (message "[sentinel] event  : %s" event)
   (when (equal event "connection broken by remote peer\n")
     (message "Resetting server to accept data")
+    (setq previous-packet-data nil)
     (setq first-only t)))
 
 
