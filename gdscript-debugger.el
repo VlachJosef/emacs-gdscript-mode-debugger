@@ -215,10 +215,56 @@
 ;;          ))
 ;;     (_ (message "UNKNOWN TYPE %s" type))))
 
+(defun gdscript-debugger--breakpoint-packet-definition (command-length file-length)
+  `((:packet-length u32r)
+    (:array-type u32r)
+    (:elements-count u32r)
+    (:command-type u32r)
+    (:command-length u32r)
+    (:command str ,command-length)
+    (align 4)
+    (:file-type u32r)
+    (:file-length u32r)
+    (:file str ,file-length)
+    (align 4)
+    (:line-type u32r)
+    (:line u32r)
+    (:boolean-type u32r)
+    (:boolean u32r)))
+
+
+(defconst variant-bool 1 "bool")
+(defconst variant-integer 2 "integer")
+(defconst variant-float 3 "float")
+(defconst variant-string 4 "string")
+(defconst variant-array 19 "array")
+
+(defun gdscript-debugger--breakpoint-command (file line)
+  (message "[ADDING BREAKPOINT] file %s , line: %s" file line)
+  (let* ((command "breakpoint")
+         (command-length (length command))
+         (file-length (length file))
+         (packet-length (+ 2 (* 10 4) command-length file-length)) ;; 2 is for alignment - it needs to be dynamic
+         (spec (gdscript-debugger--breakpoint-packet-definition command-length file-length)))
+    (bindat-pack spec
+     `((:packet-length . ,packet-length)
+       (:array-type . ,variant-array)
+       (:elements-count . 4)
+       (:command-type . ,variant-string)
+       (:command-length . ,command-length)
+       (:command . ,command)
+       (:file-type . ,variant-string)
+       (:file-length . ,file-length)
+       (:file . ,file)
+       (:line-type . ,variant-integer)
+       (:line . ,line)
+       (:boolean-type . ,variant-bool)
+       (:boolean . 1)))))
+
 (defun gdscript-debugger--packet-definition (string-length)
   `((:packet-length u32r)
     (:array-type u32r)
-    (:elements-amount u32r)
+    (:elements-count u32r)
     (:type u32r)
     (:string-length u32r)
     (:string-data str ,string-length)
@@ -229,9 +275,9 @@
   (bindat-pack
    (gdscript-debugger--packet-definition (length command))
    `((:packet-length . 24)
-     (:array-type . 19)
-     (:elements-amount . 1)
-     (:type . 4)
+     (:array-type . ,variant-array)
+     (:elements-count . 1)
+     (:type . ,variant-string)
      (:string-length . ,(length command))
      (:string-data . ,command))))
 
@@ -241,5 +287,45 @@
 ;;                           (format "%02x" byte))
 ;;                         s " ")
 ;;              (current-time-string)))
+
+(defun gdscript-debugger--add-fringe(pos &rest sprops)
+  (interactive)
+  (let* ((string (make-string 1 ?x))
+         (buffer (current-buffer))
+         (prop '(left-fringe breakpoint breakpoint-enabled))
+         (overlay (make-overlay pos pos buffer)))
+    (put-text-property 0 1 'display prop string)
+    (if sprops
+        (add-text-properties 0 1 sprops string))
+    (overlay-put overlay 'put-break t)
+    (overlay-put overlay 'before-string string)))
+
+(defun gdscript-debugger--remove-strings (start end &optional buffer)
+  "Remove strings between START and END in BUFFER.
+Remove only strings that were put in BUFFER with calls to `gdscript-debugger--add-fringe'.
+BUFFER nil or omitted means use the current buffer."
+  (unless buffer
+    (setq buffer (current-buffer)))
+  (dolist (overlay (overlays-in start end))
+    (when (overlay-get overlay 'put-break)
+      (delete-overlay overlay))))
+
+;;(make-overlay (line-beginning-position) (line-beginning-position) 'before-string)
+
+(defun gdscript-debugger--remove-breakpoint ()
+  (interactive)
+  (let((start (line-beginning-position))
+       (end (line-end-position)))
+    (gdscript-debugger--remove-strings start end)))
+
+(defun gdscript-debugger--add-breakpoint ()
+  (interactive)
+  (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
+  (let ((server-process (get-process (car server-clients)))
+        (file (concat "res://"
+                 (gdscript-util--get-godot-project-file-path-relative buffer-file-name)
+                 "." (file-name-extension buffer-file-name)))
+        (line (line-number-at-pos)))
+    (process-send-string server-process (gdscript-debugger--breakpoint-command file line))))
 
 (provide 'gdscript-debugger)
