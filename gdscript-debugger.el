@@ -23,6 +23,9 @@
 
 ;; gdscript-debugger
 
+;; Overlay arrow markers
+(defvar gdscript-debugger--thread-position nil)
+
 (defvar gdscript-debugger--boolean-spec
   '((:boolean-data u32r)))
 
@@ -308,6 +311,27 @@
   (let ((skip-this (iter-next iter)))
     '(command "debug_exit")))
 
+(defun line-posns (line)
+  "Return a pair of LINE beginning and end positions."
+  (let ((offset (1+ (- line (line-number-at-pos)))))
+    (cons
+     (line-beginning-position offset)
+     (line-end-position offset))))
+
+(defsubst gdscript-debugger--drop-res (file-path)
+  (substring file-path (length "res://")))
+
+(defun gdscript-debugger--on-stack-dump (plist)
+  (let* ((file (plist-get plist 'file))
+         (line (plist-get plist 'line))
+         (project-root (gdscript-util--find-project-configuration-file))
+         (full-file-path (concat project-root (gdscript-debugger--drop-res file))))
+    (with-current-buffer (find-file full-file-path)
+      (let* ((posns (line-posns line))
+             (start-posn (car posns)))
+        (set-marker gdscript-debugger--thread-position start-posn (current-buffer))
+        (goto-char gdscript-debugger--thread-position)))))
+
 (defun gdscript-debugger--handle-server-reply (process content)
   "Gets invoked whenever the server sends data to the client."
   (message "(DATA received): %s" (length content))
@@ -331,7 +355,8 @@
             ("performance" (let ((cmd (mk-performance iter)))
                              (message "Performace: %s" cmd)))
             ("stack_dump" (let ((cmd (mk-stack-dump iter)))
-                            (message "Stack dump %s" cmd)))
+                            (message "Stack dump %s" cmd)
+                            (gdscript-debugger--on-stack-dump (plist-get cmd 'stack-dump))))
             )))
     (iter-end-of-sequence (message "No more packets to process %s" x))))
 
@@ -427,19 +452,42 @@
    ((eq (process-status process) 'closed)
     (message "EHHHH ???"))))
 
+(defmacro gdscript-debugger--send-command (&rest body)
+  "Todo"
+  (declare (indent 0) (debug t))
+  `(pcase server-clients
+     (`() (message "No game process is running."))
+     (`(,server-process)
+      (let ((command (progn ,@body)))
+        (process-send-string server-process command)
+        ;;(message "%s %s" server-process (process-status server-process))
+        ))
+     (_ (message "More than one game process running"))))
+
+;;(print (macroexpand '(gdscript-debugger--send-command server-process (message "HIII %s" server-process))))
+
 (defun gdscript-debugger-get-stack-dump()
-  (let ((server-process (get-process (car server-clients))))
-    (message "%s %s" server-process (process-status server-process))
-    (process-send-string server-process (gdscript-debugger--command "get_stack_dump"))))
+  (interactive)
+  (gdscript-debugger--send-command (gdscript-debugger--command "get_stack_dump")))
 
 (defun gdscript-debugger-continue()
-  (let ((server-process (get-process (car server-clients))))
-    (message "%s %s" server-process (process-status server-process))
-    (process-send-string server-process (gdscript-debugger--command "continue"))))
+  (interactive)
+  (gdscript-debugger--send-command (gdscript-debugger--command "continue")))
+
+(defun gdscript-debugger-next()
+  (interactive)
+  (gdscript-debugger--send-command (gdscript-debugger--command "next")))
 
 ;;;###autoload
 (defun gdscript-debugger-make-server()
   (interactive)
+
+  (setq gdscript-debugger--thread-position (make-marker))
+  (add-to-list 'overlay-arrow-variable-list 'gdscript-debugger--thread-position)
+
+  ;;(set-marker gdscript-debugger--thread-position (point) (current-buffer))
+
+
   ;; (make-network-process
   ;;  :name "echo-server"
   ;;  :buffer "*echo-server*"
@@ -504,12 +552,16 @@
 (defconst variant-string 4 "string")
 (defconst variant-array 19 "array")
 
-(defun gdscript-debugger--breakpoint-command (file line)
+(defun boolean-to-integer (b)
+  (if (null b) 0 1))
+
+(defun gdscript-debugger--breakpoint-command (file line add-or-remove)
   (message "[ADDING BREAKPOINT] file %s , line: %s" file line)
   (let* ((command "breakpoint")
          (command-length (length command))
+         (command-alength (align-length command))
          (file-length (length file))
-         (packet-length (+ 2 (* 10 4) command-length file-length)) ;; 2 is for alignment - it needs to be dynamic
+         (packet-length (+ (* 10 4) command-alength file-length))
          (spec (gdscript-debugger--breakpoint-packet-definition command-length file-length)))
     (bindat-pack spec
      `((:packet-length . ,packet-length)
@@ -524,7 +576,7 @@
        (:line-type . ,variant-integer)
        (:line . ,line)
        (:boolean-type . ,variant-bool)
-       (:boolean . 1)))))
+       (:boolean . ,(boolean-to-integer add-or-remove))))))
 
 (defun gdscript-debugger--packet-definition (string-length)
   `((:packet-length u32r)
@@ -587,20 +639,27 @@ BUFFER nil or omitted means use the current buffer."
 
 ;;(make-overlay (line-beginning-position) (line-beginning-position) 'before-string)
 
+(defun gdscript-debugger--current-file ()
+  (concat "res://"
+          (gdscript-util--get-godot-project-file-path-relative buffer-file-name)
+          "." (file-name-extension buffer-file-name)))
+
 (defun gdscript-debugger--remove-breakpoint ()
   (interactive)
-  (let((start (line-beginning-position))
-       (end (line-end-position)))
-    (gdscript-debugger--remove-strings start end)))
+  (gdscript-debugger--send-command
+    (let ((start (line-beginning-position))
+          (end (line-end-position))
+          (file (gdscript-debugger--current-file))
+          (line (line-number-at-pos)))
+      (gdscript-debugger--remove-strings start end)
+      (gdscript-debugger--breakpoint-command file line nil))))
 
 (defun gdscript-debugger--add-breakpoint ()
   (interactive)
-  (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
-  (let ((server-process (get-process (car server-clients)))
-        (file (concat "res://"
-                 (gdscript-util--get-godot-project-file-path-relative buffer-file-name)
-                 "." (file-name-extension buffer-file-name)))
-        (line (line-number-at-pos)))
-    (process-send-string server-process (gdscript-debugger--breakpoint-command file line))))
+  (gdscript-debugger--send-command
+    (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
+    (let ((file (gdscript-debugger--current-file))
+          (line (line-number-at-pos)))
+      (gdscript-debugger--breakpoint-command file line t))))
 
 (provide 'gdscript-debugger)
