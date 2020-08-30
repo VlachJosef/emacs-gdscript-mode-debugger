@@ -17,40 +17,64 @@
 ;; https://gist.github.com/mogigoma/3174341
 
 (require 'bindat)
+(require 'generator)
 
 ;; (eval (if (eq (bindat-get-field struct 'data-type) 4) str byte))
 
 ;; gdscript-debugger
 
 (defvar gdscript-debugger--boolean-spec
-  '((:boolean-data u32r)
-    ;;(eval (message "IN A BOOLEAN %s" last))
-    ))
+  '((:boolean-data u32r)))
 
 (defvar gdscript-debugger--integer-spec
-  '((:integer-data u32r)
-    ;;(eval (message "IN A INTEGER %s" last))
-    ))
+  '((:integer-data u32r)))
+
+;; Credit goes to https://github.com/skeeto/bitpack/blob/master/bitpack.el
+(defsubst bitpack--load-f32 (b0 b1 b2 b3)
+  (let* ((negp (= #x80 (logand b0 #x80)))
+         (exp (logand (logior (ash b0 1) (ash b1 -7)) #xff))
+         (mantissa (logior #x800000
+                           (ash (logand #x7f b1) 16)
+                           (ash b2 8)
+                           b3))
+         (result (if (= #xff exp)
+                     (if (= #x800000 mantissa)
+                         1.0e+INF
+                       0.0e+NaN)
+                   (ldexp (ldexp mantissa -24) (- exp 126)))))
+    (if negp
+        (- result)
+      result)))
 
 (defvar gdscript-debugger--float-spec
-  '((:float-data u32r) ;; How to read float?
-    ;;(eval (message "IN A FLOAT %s" last))
+  '((:float-byte-a byte)
+    (:float-byte-b byte)
+    (:float-byte-c byte)
+    (:float-byte-d byte)
+    (:float-value eval (bitpack--load-f32
+                        (bindat-get-field struct :float-byte-d)
+                        (bindat-get-field struct :float-byte-c)
+                        (bindat-get-field struct :float-byte-b)
+                        (bindat-get-field struct :float-byte-a)))
+    ;; (eval (progn
+    ;;         (message "IN A FLOAT %s" last)
+    ;;         ;; (gd-bytes last)
+    ;;         )
+    ;;       )
     ))
 
 (defvar gdscript-debugger--string-spec
   '((:data-length u32r)
     (:string-data str (:data-length))
-    (align 4)
-    ;; (eval (message "IN A STRING %s %s" last bindat-idx))
-    ))
+    (align 4)))
 
 (defvar gdscript-debugger--dictionary-spec
-  '((:dictionary-length   u32r)
-    ;;(eval (message "DICTIONARY size: %s" last))
+  '((:elements u32r)
+    (:dictionary-length eval (* 2 last))
     (:items repeat (:dictionary-length) (struct godot-data-bindat-spec))))
 
 (defvar gdscript-debugger--array-spec
-  '((:array-length   u32r)
+  '((:array-length u32r)
     ;;(:string-data str (:data-length))
     ;;(align 4)
     ;;(logand (bindat-get-field struct :array-length) #x7FFFFFFF)
@@ -60,7 +84,7 @@
     ))
 
 (defvar gdscript-debugger--pool-vector-2-array-spec
-  '((:array-length   u32r)
+  '((:array-length u32r)
     ;;(:string-data str (:data-length))
     ;;(align 4)
     ;;(logand (bindat-get-field struct :array-length) #x7FFFFFFF)
@@ -178,16 +202,7 @@
 (defun gdscript-debugger--process-packet (content offset)
   (bindat-unpack godot-data-bindat-spec content offset))
 
-(defun gdscript-debugger--handle-server-reply (process content)
-  "Gets invoked whenever the server sends data to the client."
-  (message "(DATA received): %s" (length content))
-  (message "(Old DATA): %s" (length gdscript-debugger--previous-packet-data))
-
-  ;;(message "(stringp content): %s" (stringp content))
-  ;;(message "(type-of content): %s" (type-of content))
-
-  ;;(content-2 (concat previous-packet-data content))
-
+(iter-defun command-iter (content)
   (let* ((content (concat gdscript-debugger--previous-packet-data content))
          (content-length (length content))
          (offset 0))
@@ -201,6 +216,7 @@
         (if (< next-packet-offset content-length)
             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
               (message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
+              (iter-yield packet-data)
               (setq offset next-packet-offset))
           (progn
             (setq gdscript-debugger--previous-packet-data (substring content offset content-length))
@@ -211,11 +227,184 @@
               (message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
               (message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
               (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
+                (iter-yield packet-data)
+                (setq gdscript-debugger--previous-packet-data nil)
                 (message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data))
               ))
             (setq offset next-packet-offset) ;; to break out of loop
-            )))))
-  (message "(DATA processed): %s" (length content)))
+            ))))))
+
+(defsubst get-boolean (struct-data)
+  (bindat-get-field struct-data :boolean-data))
+
+(defsubst get-integer (struct-data)
+  (bindat-get-field struct-data :integer-data))
+
+(defsubst get-string (struct-data)
+  (bindat-get-field struct-data :string-data))
+
+;; ((:items
+;;((:string-data . file) (:data-length . 4) (:data-type . 4))
+;;((:string-data . res://scenes/world/Player.gd) (:data-length . 28) (:data-type . 4))
+;;((:string-data . line) (:data-length . 4) (:data-type . 4))
+;;((:integer-data . 151) (:data-type . 2))) (:dictionary-length . 4) (:data-type . 18))
+
+(defun stack-data-to-plist (stack-data)
+  (pcase stack-data
+    (`(,file-key, file-value, line-key, line-value, function-key, function-value, id-key, id-value)
+     `(file ,(get-string file-value)
+            line ,(get-integer line-value)
+            function ,(get-string function-value)))))
+
+(defun error-data-to-plist (error-data)
+  (pcase error-data
+    (`(,hr, min, sec, msec, source-func, source-file, source-line, error-msg, error-descr, warning)
+     `(hr ,(get-integer hr)
+          min ,(get-integer min)
+          sec ,(get-integer sec)
+          msec ,(get-integer msec)
+          source-func ,(get-string source-func)
+          source-file ,(get-string source-file)
+          source-line ,(get-integer source-line)
+          error-msg ,(get-string error-msg)
+          error-descr ,(get-string error-descr)
+          warning, (get-boolean warning)))))
+
+(defun mk-error (iter)
+  (let ((callstack-size (bindat-get-field (iter-next iter) :integer-data))
+        (error-data (bindat-get-field (iter-next iter) :items))
+        (error-callstack-size (bindat-get-field (iter-next iter) :integer-data))
+        ;; TODO process call stack
+        ;; (error-callstack-size (bindat-get-field (iter-next iter) :integer-data))
+        )
+    `(command "error" callstack-size ,callstack-size error-data ,(error-data-to-plist error-data) error-callstack-size, error-callstack-size)))
+
+(defun mk-performance (iter)
+  (let ((skip-this (iter-next iter))
+        (performance-data (bindat-get-field (iter-next iter) :items)))
+    `(command "performace" performance-data ,performance-data)))
+
+(defun mk-stack-dump (iter)
+  (let ((stack-level-count (get-integer (iter-next iter)))
+        (stack-data (bindat-get-field (iter-next iter) :items)))
+    `(command "stack_dump" stack-dump , (stack-data-to-plist stack-data))))
+
+(defun mk-output (iter)
+  (let ((output-count (bindat-get-field (iter-next iter) :integer-data))
+        (outputs))
+    (message "output-count: %s %s" output-count (type-of output-count))
+    (dotimes (i output-count)
+      (let ((output (bindat-get-field (iter-next iter) :string-data)))
+        (setq outputs (cons output outputs))))
+    `(command "output" outputs, outputs)))
+
+(defun mk-debug-enter (iter)
+  (let ((skip-this (iter-next iter))
+        (can-continue (bindat-get-field (iter-next iter) :boolean-data))
+        (reason (bindat-get-field (iter-next iter) :string-data)))
+    `(command "debug_enter" can-continue ,can-continue reason, reason)))
+
+(defun mk-debug-exit (iter)
+  (let ((skip-this (iter-next iter)))
+    '(command "debug_exit")))
+
+(defun gdscript-debugger--handle-server-reply (process content)
+  "Gets invoked whenever the server sends data to the client."
+  (message "(DATA received): %s" (length content))
+  (message "(Old DATA): %s" (length gdscript-debugger--previous-packet-data))
+
+  (condition-case x
+      (let ((iter (command-iter content)))
+        (while t
+          (pcase (bindat-get-field (iter-next iter) :string-data)
+            ("debug_enter" (let ((cmd (mk-debug-enter iter)))
+                             (message "Debug_enter: %s" cmd)))
+            ("debug_exit" (let ((cmd (mk-debug-exit iter)))
+                            (message "Debug_exit: %s " cmd)))
+            ("output" (let ((cmd (mk-output iter)))
+                        (message "Output: %s" (plist-get cmd 'outputs))
+                        ;; (dolist (element (plist-get cmd 'outputs))
+                        ;;   (message "output: %s" element))
+                        ))
+            ("error" (let ((cmd (mk-error iter)))
+                       (message "Error: %s" cmd)))
+            ("performance" (let ((cmd (mk-performance iter)))
+                             (message "Performace: %s" cmd)))
+            ("stack_dump" (let ((cmd (mk-stack-dump iter)))
+                            (message "Stack dump %s" cmd)))
+            )))
+    (iter-end-of-sequence (message "No more packets to process %s" x))))
+
+  ;;(message "(stringp content): %s" (stringp content))
+  ;;(message "(type-of content): %s" (type-of content))
+
+  ;;(content-2 (concat previous-packet-data content))
+
+  ;; (let* ((content (concat gdscript-debugger--previous-packet-data content))
+  ;;        (content-length (length content))
+  ;;        (offset 0)
+  ;;        (plist))
+  ;;   (message "(content received): %s" (length content))
+  ;;   (while (< offset content-length)
+  ;;     (let* ((packet-length-data (gdscript-debugger--current-packet content offset))
+  ;;            (packet-length (bindat-get-field packet-length-data :packet-length))
+  ;;            (next-packet-offset (+ 4 offset packet-length)))
+  ;;       ;;(message "packet-length-data: %s" packet-length-data)
+  ;;       (message "offset %s packet-length     : %s" offset packet-length)
+  ;;       (if (< next-packet-offset content-length)
+  ;;           (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
+  ;;             (message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
+  ;;             (setq offset next-packet-offset))
+  ;;         (progn
+  ;;           (setq gdscript-debugger--previous-packet-data (substring content offset content-length))
+  ;;
+  ;;           (message "UPS, we need more data!!!!!!!!!!!!!!!!!!!!!!!!!!! %s %s" next-packet-offset content-length)
+  ;;           (cond
+  ;;            ((eq next-packet-offset content-length)
+  ;;             (message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
+  ;;             (message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
+  ;;             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
+  ;;               (message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data))
+  ;;             ))
+  ;;           (setq offset next-packet-offset) ;; to break out of loop
+  ;;           )))))
+  ;;(message "(DATA processed): %s" (length content)))
+
+;; (defun ignore-handler (packet-data plist name))
+;;
+;; (defmacro gd-string-handler (packet-data plist name)
+;;   (let ((string (bindat-get-field ,packet-data :string-data)))
+;;     (setq ,plist (plist-put ,plist ,name string))))
+;;
+;; (defmacro gd-boolean-handler (packet-data plist name)
+;;   `(pcase (bindat-get-field ,packet-data :boolean-data)
+;;   ;;`(pcase ,packet-data
+;;     (0 (setq ,plist (plist-put ,plist ,name nil)))
+;;     (1 (setq ,plist (plist-put ,plist ,name t)))))
+;;
+;; ;; (bindat-get-field '((stopped-threads . "all") (thread-id . "1") (reason . "end-stepping-range")) 'reason)
+;;
+;; (defun plist-test(x)
+;;   (let ((plist))
+;;     (gd-boolean-handler x plist 'hello)
+;;     (message "HERE %s" plist)))
+;;
+;; ;; continuation handling http://web.mit.edu/Emacs/source/emacs/lisp/server.el
+;;
+;; (plist-get '(command "debug_enter" can-continue t reason "Breakpoint") 'reason)
+;;
+;; (defun command-dispatcher (packet-data)
+;;   (pcase (bindat-get-field packet-data :string-data)
+;;     ;; packet_peer_stream->put_var("debug_enter");
+;;     ;; packet_peer_stream->put_var(2);
+;;     ;; packet_peer_stream->put_var(p_can_continue);
+;;     ;; packet_peer_stream->put_var(p_script->debug_get_error());
+;;     ("debug_enter" '(ignore-handler gd-boolean-handler gd-string-handler))
+;;     ("debug_exit")
+;;     ("output")
+;;     ("error")
+;;     ("performance"))
+;;   )
 
 ;;(defvar current-process nil)
 
