@@ -71,6 +71,26 @@
     (:string-data str (:data-length))
     (align 4)))
 
+(defvar gdscript-debugger--vector2-spec
+  '((:float-byte-a byte)
+    (:float-byte-b byte)
+    (:float-byte-c byte)
+    (:float-byte-d byte)
+    (:x eval (bitpack--load-f32
+                        (bindat-get-field struct :float-byte-d)
+                        (bindat-get-field struct :float-byte-c)
+                        (bindat-get-field struct :float-byte-b)
+                        (bindat-get-field struct :float-byte-a)))
+    (:float-byte-e byte)
+    (:float-byte-f byte)
+    (:float-byte-g byte)
+    (:float-byte-h byte)
+    (:y eval (bitpack--load-f32
+                        (bindat-get-field struct :float-byte-h)
+                        (bindat-get-field struct :float-byte-g)
+                        (bindat-get-field struct :float-byte-f)
+                        (bindat-get-field struct :float-byte-e)))))
+
 (defvar gdscript-debugger--dictionary-spec
   '((:elements u32r)
     (:dictionary-length eval (* 2 last))
@@ -91,12 +111,20 @@
     ;;(:string-data str (:data-length))
     ;;(align 4)
     ;;(logand (bindat-get-field struct :array-length) #x7FFFFFFF)
-    (eval (message "pool-vector-2-array-spec size: %s" last))
+    ;;(eval (message "pool-vector-2-array-spec size: %s" last))
+    (:items repeat (:array-length) (struct gdscript-debugger--vector2-spec))
     ;;(:items repeat (:array-length) (struct godot-data-bindat-spec))
     ;;(eval (message "AFTER  IN A ARRAY %s" last))
     ))
 
-(defvar gdscript-debugger--unknown-spec-5 '((eval (message "IN A SPEC 5"))))
+(defvar gdscript-debugger--object-as-id
+  '((:object-as-id-a u32r)
+    (:object-as-id-b u32r)
+    (:long eval (let ((a (bindat-get-field struct :object-as-id-a))
+                      (b (bindat-get-field struct :object-as-id-b)))
+                  (logior (lsh b 32) a)))
+    (eval (message "gdscript-debugger--object-as-id size: %s %s" (bindat-get-field struct :object-as-id-a) (bindat-get-field struct :object-as-id-b)))))
+
 (defvar gdscript-debugger--unknown-spec-6 '((eval (message "IN A SPEC 6"))))
 (defvar gdscript-debugger--unknown-spec-7 '((eval (message "IN A SPEC 7"))))
 (defvar gdscript-debugger--unknown-spec-8 '((eval (message "IN A SPEC 8"))))
@@ -109,7 +137,6 @@
 (defvar gdscript-debugger--unknown-spec-15 '((eval (message "IN A SPEC 15"))))
 (defvar gdscript-debugger--unknown-spec-16 '((eval (message "IN A SPEC 16"))))
 (defvar gdscript-debugger--unknown-spec-17 '((eval (message "IN A SPEC 17"))))
-(defvar gdscript-debugger--unknown-spec-18 '((eval (message "IN A SPEC 18"))))
 (defvar gdscript-debugger--unknown-spec-20 '((eval (message "IN A SPEC 20"))))
 (defvar gdscript-debugger--unknown-spec-21 '((eval (message "IN A SPEC 21"))))
 (defvar gdscript-debugger--unknown-spec-22 '((eval (message "IN A SPEC 22"))))
@@ -123,14 +150,14 @@
   '((eval (message "IN A SPEC %s" (bindat-get-field struct :data-type)))))
 
 (defvar godot-data-bindat-spec
-  '((:data-type     u32r)
+  `((:data-type     u32r)
     ;;(eval (message "2222:data-type %s" last))
     (union (:data-type)
            (1 (struct gdscript-debugger--boolean-spec))
            (2 (struct gdscript-debugger--integer-spec))
            (3 (struct gdscript-debugger--float-spec))
            (4 (struct gdscript-debugger--string-spec))
-           (5 (struct gdscript-debugger--unknown-spec-5))
+           (5 (struct gdscript-debugger--vector2-spec))
            (6 (struct gdscript-debugger--unknown-spec-6))
            (7 (struct gdscript-debugger--unknown-spec-7))
            (8 (struct gdscript-debugger--unknown-spec-8))
@@ -143,6 +170,7 @@
            (15 (struct gdscript-debugger--unknown-spec-15))
            (16 (struct gdscript-debugger--unknown-spec-16))
            (17 (struct gdscript-debugger--unknown-spec-17))
+           (,(+ 17 (lsh 1 16)) (struct gdscript-debugger--object-as-id))
            (18 (struct gdscript-debugger--dictionary-spec))
            (19 (struct gdscript-debugger--array-spec))
            (20 (struct gdscript-debugger--unknown-spec-20))
@@ -243,8 +271,26 @@
 (defsubst get-integer (struct-data)
   (bindat-get-field struct-data :integer-data))
 
+(defsubst get-float (struct-data)
+  (bindat-get-field struct-data :float-value))
+
 (defsubst get-string (struct-data)
   (bindat-get-field struct-data :string-data))
+
+(defsubst get-vector2 (struct-data)
+  (let ((x (bindat-get-field struct-data :x))
+        (y (bindat-get-field struct-data :y)))
+    (message "x: %s" x)
+    (message "y: %s" y)
+    `(,x . ,y)))
+
+(defsubst get-object-id (struct-data)
+  (bindat-get-field struct-data :long))
+
+(defsubst get-dictionary (struct-data)
+  (bindat-get-field struct-data :items))
+
+
 
 ;; ((:items
 ;;((:string-data . file) (:data-length . 4) (:data-type . 4))
@@ -286,6 +332,44 @@
   (let ((skip-this (iter-next iter))
         (performance-data (bindat-get-field (iter-next iter) :items)))
     `(command "performace" performance-data ,performance-data)))
+
+(defun read-var-names (iter count)
+  (let ((variables))
+    (dotimes (i count)
+      (let* ((var-name (bindat-get-field (iter-next iter) :string-data))
+             (var-value (iter-next iter))
+             (var-type (bindat-get-field var-value :data-type))
+             (var-val (pcase var-type
+                (1 (get-boolean var-value))
+                (2 (get-integer var-value))
+                (3 (get-float var-value))
+                (4 (get-string var-value))
+                (5 (get-vector2 var-value))
+                (pred (+ 17 (lsh 1 16)) (get-object-id var-value))
+                (18 (get-dictionary var-value)))))
+        ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
+        ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
+
+        (setq variables (cons `(,var-name . (,var-type . ,var-val)) variables))))
+    variables))
+
+(defun mk-stack-frame-vars (iter)
+  (let* ((total-size (get-integer (iter-next iter)))
+         (locals-size (get-integer (iter-next iter)))
+         (var-names (read-var-names iter locals-size))
+         (members-size (get-integer (iter-next iter)))
+         (members-names (read-var-names iter members-size))
+         (globals-size (get-integer (iter-next iter)))
+         (globals-names (read-var-names iter globals-size)))
+
+    `(command "stack_frame_vars"
+              total-size ,total-size
+              locals-size ,locals-size
+              var-names, var-names
+              members-size ,members-size
+              members-names ,members-names
+              globals-size ,globals-size
+              globals-names ,globals-names)))
 
 (defun mk-stack-dump (iter)
   (let ((stack-level-count (get-integer (iter-next iter)))
@@ -357,7 +441,8 @@
             ("stack_dump" (let ((cmd (mk-stack-dump iter)))
                             (message "Stack dump %s" cmd)
                             (gdscript-debugger--on-stack-dump (plist-get cmd 'stack-dump))))
-            )))
+            ("stack_frame_vars" (let ((cmd (mk-stack-frame-vars iter)))
+                            (message "Stack frame vars %s" cmd))))))
     (iter-end-of-sequence (message "No more packets to process %s" x))))
 
   ;;(message "(stringp content): %s" (stringp content))
@@ -528,6 +613,17 @@
 ;;          ))
 ;;     (_ (message "UNKNOWN TYPE %s" type))))
 
+(defun gdscript-debugger--get-stack-frame-vars-definition (command-length)
+  `((:packet-length u32r)
+    (:array-type u32r)
+    (:elements-count u32r)
+    (:command-type u32r)
+    (:command-length u32r)
+    (:command str ,command-length)
+    (align 4)
+    (:frame-type u32r)
+    (:frame u32r)))
+
 (defun gdscript-debugger--breakpoint-packet-definition (command-length file-length)
   `((:packet-length u32r)
     (:array-type u32r)
@@ -554,6 +650,22 @@
 
 (defun boolean-to-integer (b)
   (if (null b) 0 1))
+
+(defun gdscript-debugger--get-stack-frame-vars (frame)
+  (let* ((command "get_stack_frame_vars")
+         (command-length (length command))
+         (command-alength (align-length command))
+         (packet-length (+ (* 6 4) command-alength))
+         (spec (gdscript-debugger--get-stack-frame-vars-definition command-length)))
+    (bindat-pack spec
+     `((:packet-length . ,packet-length)
+       (:array-type . ,variant-array)
+       (:elements-count . 2)
+       (:command-type . ,variant-string)
+       (:command-length . ,command-length)
+       (:command . ,command)
+       (:frame-type . ,variant-integer)
+       (:frame . ,frame)))))
 
 (defun gdscript-debugger--breakpoint-command (file line add-or-remove)
   (message "[ADDING BREAKPOINT] file %s , line: %s" file line)
@@ -661,5 +773,10 @@ BUFFER nil or omitted means use the current buffer."
     (let ((file (gdscript-debugger--current-file))
           (line (line-number-at-pos)))
       (gdscript-debugger--breakpoint-command file line t))))
+
+(defun gdscript-debugger-get-stack-frame-vars ()
+  (interactive)
+  (gdscript-debugger--send-command
+    (gdscript-debugger--get-stack-frame-vars 0)))
 
 (provide 'gdscript-debugger)
