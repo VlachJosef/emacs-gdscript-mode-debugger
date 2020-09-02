@@ -117,6 +117,8 @@
     ;;(eval (message "AFTER  IN A ARRAY %s" last))
     ))
 
+(defvar gdscript-debugger--rid-spec nil) ;; (unsupported)
+
 (defvar gdscript-debugger--object-as-id
   '((:object-as-id-a u32r)
     (:object-as-id-b u32r)
@@ -135,7 +137,6 @@
 (defvar gdscript-debugger--unknown-spec-13 '((eval (message "IN A SPEC 13"))))
 (defvar gdscript-debugger--unknown-spec-14 '((eval (message "IN A SPEC 14"))))
 (defvar gdscript-debugger--unknown-spec-15 '((eval (message "IN A SPEC 15"))))
-(defvar gdscript-debugger--unknown-spec-16 '((eval (message "IN A SPEC 16"))))
 (defvar gdscript-debugger--unknown-spec-17 '((eval (message "IN A SPEC 17"))))
 (defvar gdscript-debugger--unknown-spec-20 '((eval (message "IN A SPEC 20"))))
 (defvar gdscript-debugger--unknown-spec-21 '((eval (message "IN A SPEC 21"))))
@@ -151,7 +152,8 @@
 
 (defvar godot-data-bindat-spec
   `((:data-type     u32r)
-    ;;(eval (message "2222:data-type %s" last))
+    ;;(:masked-data-type eval (logand (bindat-get-field struct :data-type) #xff))
+    (eval (message "---------------------------------------------------------------------------------------------------- %s %s" last (logand (bindat-get-field struct :data-type) #xff)))
     (union (:data-type)
            (1 (struct gdscript-debugger--boolean-spec))
            (2 (struct gdscript-debugger--integer-spec))
@@ -168,7 +170,7 @@
            (13 (struct gdscript-debugger--unknown-spec-13))
            (14 (struct gdscript-debugger--unknown-spec-14))
            (15 (struct gdscript-debugger--unknown-spec-15))
-           (16 (struct gdscript-debugger--unknown-spec-16))
+           (16 (struct gdscript-debugger--rid-spec))
            (17 (struct gdscript-debugger--unknown-spec-17))
            (,(+ 17 (lsh 1 16)) (struct gdscript-debugger--object-as-id))
            (18 (struct gdscript-debugger--dictionary-spec))
@@ -246,7 +248,7 @@
         (message "offset %s packet-length     : %s" offset packet-length)
         (if (< next-packet-offset content-length)
             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-              (message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
+              (message "packet-data %s - %s       : %s %s %s" (+ 4 offset)  next-packet-offset (type-of packet-data) (type-of (car packet-data)) (car packet-data))
               (iter-yield packet-data)
               (setq offset next-packet-offset))
           (progn
@@ -277,20 +279,55 @@
 (defsubst get-string (struct-data)
   (bindat-get-field struct-data :string-data))
 
-(defsubst get-vector2 (struct-data)
+
+(defsubst to-rid (struct-data)
+  (rid-create))
+
+(defsubst to-vector2 (struct-data)
   (let ((x (bindat-get-field struct-data :x))
         (y (bindat-get-field struct-data :y)))
-    (message "x: %s" x)
-    (message "y: %s" y)
-    `(,x . ,y)))
+    (vector2-create :x x :y y)))
 
-(defsubst get-object-id (struct-data)
-  (bindat-get-field struct-data :long))
+(defsubst to-boolean (struct-data)
+  (prim-bool-create :value (if (eq 1 (get-boolean struct-data))
+                             t
+                           nil)))
 
-(defsubst get-dictionary (struct-data)
-  (bindat-get-field struct-data :items))
+(defsubst to-integer (struct-data)
+  (prim-integer-create :value (get-integer struct-data)))
 
+(defsubst to-float (struct-data)
+  (prim-float-create :value (get-float struct-data)))
 
+(defsubst to-string (struct-data)
+  (prim-string-create :value (get-string struct-data)))
+
+(defsubst to-object-id (struct-data)
+  (object-id-create :value (bindat-get-field struct-data :long)))
+
+(defsubst to-dictionary (struct-data)
+  (let* ((items (bindat-get-field struct-data :items)))
+    (dictionary-create :elements (to-dic items))))
+
+(defun to-dic (xs)
+  (let ((variables))
+    (loop for (k v) on xs by (function cddr)
+          do (setq variables (cons (from-key-value k v) variables)))
+    variables))
+
+(defun from-key-value (key value)
+  (let* ((var-name (bindat-get-field key :string-data))
+         (var-type (bindat-get-field value :data-type))
+         (var-val (pcase var-type
+                    (1 (to-boolean value))
+                    (2 (to-integer value))
+                    (3 (to-float value))
+                    (4 (to-string value))
+                    (5 (to-vector2 value))
+                    (16 (to-rid value))
+                    ((pred (= (+ 17 (lsh 1 16)))) (to-object-id value))
+                    (18 (to-dictionary value)))))
+    `(,var-name . ,var-val)))
 
 ;; ((:items
 ;;((:string-data . file) (:data-length . 4) (:data-type . 4))
@@ -340,17 +377,18 @@
              (var-value (iter-next iter))
              (var-type (bindat-get-field var-value :data-type))
              (var-val (pcase var-type
-                (1 (get-boolean var-value))
-                (2 (get-integer var-value))
-                (3 (get-float var-value))
-                (4 (get-string var-value))
-                (5 (get-vector2 var-value))
-                (pred (+ 17 (lsh 1 16)) (get-object-id var-value))
-                (18 (get-dictionary var-value)))))
+                (1 (to-boolean var-value))
+                (2 (to-integer var-value))
+                (3 (to-float var-value))
+                (4 (to-string var-value))
+                (5 (to-vector2 var-value))
+                (16 (to-rid var-value))
+                ((pred (= (+ 17 (lsh 1 16)))) (to-object-id var-value))
+                (18 (to-dictionary var-value)))))
         ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
         ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
 
-        (setq variables (cons `(,var-name . (,var-type . ,var-val)) variables))))
+        (setq variables (cons `(,var-name . ,var-val) variables))))
     variables))
 
 (defun mk-stack-frame-vars (iter)
@@ -780,3 +818,58 @@ BUFFER nil or omitted means use the current buffer."
     (gdscript-debugger--get-stack-frame-vars 0)))
 
 (provide 'gdscript-debugger)
+
+
+;; (set-marker gud-overlay-arrow-position (point) (current-buffer))
+
+;;(object-id-create :value "abc")
+
+;;(vector2-create :x 12 :y 34)
+
+;; (rid-create)
+
+(cl-defstruct (object-id (:constructor object-id-create)
+                         (:copier nil)
+                         (:conc-name object-id->))
+  value)
+
+(cl-defstruct (prim-bool (:constructor prim-bool-create)
+                       (:copier nil)
+                       (:conc-name boolean->))
+  value)
+
+(cl-defstruct (prim-integer (:constructor prim-integer-create)
+                       (:copier nil)
+                       (:conc-name integer->))
+  value)
+
+(cl-defstruct (prim-float (:constructor prim-float-create)
+                     (:copier nil)
+                     (:conc-name float->))
+  value)
+
+(cl-defstruct (prim-string (:constructor prim-string-create)
+                      (:copier nil)
+                      (:conc-name string->))
+  value)
+
+(cl-defstruct (rid (:constructor rid-create)
+                   (:copier nil)))
+
+(cl-defstruct (pool-vector2-array (:constructor pool-vector2-array-create)
+                                  (:copier nil)
+                                  (:conc-name pool-vector2-array->))
+  elements)
+
+(cl-defstruct (dictionary (:constructor dictionary-create)
+                          (:copier nil)
+                          (:conc-name dictionary->))
+  elements)
+
+(cl-defstruct (vector2 (:constructor vector2-create)
+                       (:copier nil)
+                       (:conc-name vector2->))
+  x y)
+
+
+
