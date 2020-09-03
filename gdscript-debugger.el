@@ -26,6 +26,8 @@
 ;; Overlay arrow markers
 (defvar gdscript-debugger--thread-position nil)
 
+(defvar gdscript-debugger--null-spec)
+
 (defvar gdscript-debugger--boolean-spec
   '((:boolean-data u32r)))
 
@@ -124,8 +126,7 @@
     (:object-as-id-b u32r)
     (:long eval (let ((a (bindat-get-field struct :object-as-id-a))
                       (b (bindat-get-field struct :object-as-id-b)))
-                  (logior (lsh b 32) a)))
-    (eval (message "gdscript-debugger--object-as-id size: %s %s" (bindat-get-field struct :object-as-id-a) (bindat-get-field struct :object-as-id-b)))))
+                  (logior (lsh b 32) a)))))
 
 (defvar gdscript-debugger--unknown-spec-6 '((eval (message "IN A SPEC 6"))))
 (defvar gdscript-debugger--unknown-spec-7 '((eval (message "IN A SPEC 7"))))
@@ -142,19 +143,18 @@
 (defvar gdscript-debugger--unknown-spec-21 '((eval (message "IN A SPEC 21"))))
 (defvar gdscript-debugger--unknown-spec-22 '((eval (message "IN A SPEC 22"))))
 (defvar gdscript-debugger--unknown-spec-23 '((eval (message "IN A SPEC 23"))))
-;;(defvar gdscript-debugger--unknown-spec-24 '((eval (message "IN A SPEC 24"))))
 (defvar gdscript-debugger--unknown-spec-25 '((eval (message "IN A SPEC 25"))))
 (defvar gdscript-debugger--unknown-spec-26 '((eval (message "IN A SPEC 26"))))
 (defvar gdscript-debugger--unknown-spec-27 '((eval (message "IN A SPEC 27"))))
 
 (defvar gdscript-debugger--my-spec
-  '((eval (message "IN A SPEC %s" (bindat-get-field struct :data-type)))))
+  '((eval (message "IN A SPEC %s %s" (bindat-get-field struct :data-type) struct))))
 
 (defvar godot-data-bindat-spec
   `((:data-type     u32r)
     ;;(:masked-data-type eval (logand (bindat-get-field struct :data-type) #xff))
-    (eval (message "---------------------------------------------------------------------------------------------------- %s %s" last (logand (bindat-get-field struct :data-type) #xff)))
     (union (:data-type)
+           (0 nil)
            (1 (struct gdscript-debugger--boolean-spec))
            (2 (struct gdscript-debugger--integer-spec))
            (3 (struct gdscript-debugger--float-spec))
@@ -190,45 +190,6 @@
 (defvar gdscript-debugger--packet-length-bindat-spec
   '((:packet-length u32r)))
 
-
-;; (defvar packet-bindat-spec
-;;   '((eval (message "CALLED packet-bindat-spec"))
-;;     (:packet-length u32r)
-;;     (eval (message "Packet size %s, index %s" last bindat-idx))
-;;     (eval
-;;      ;; Let's check if we have enough data for current packet
-;;      (if (> (+ bindat-idx last) (length bindat-raw))
-;;          (progn
-;;            (setq previous-packet-data (substring bindat-raw bindat-idx (length bindat-raw)))
-;;            (message " ------------ Ups, we need next data AAAA:")
-;;            nil)
-;;        (progn
-;;          (message "BEFORE Packet size %s, index %s" last bindat-idx)
-;;          ;;(struct godot-data-bindat-spec)
-;;          (bindat-unpack godot-data-bindat-spec bindat-raw bindat-idx)
-;;          (message "AFTER  Packet size %s, index %s" last bindat-idx)
-;;          (eval
-;;           ;; Let's check if we have any data left
-;;           (if (eq (+ last bindat-idx) (length bindat-raw))
-;;               (progn (message " ----------- Ups, we need next data BBBB")
-;;                      nil)
-;;             (bindat-unpack packet-bindat-spec bindat-raw (+ last bindat-idx)))))))))
-
-;; (defvar packet-type-bindat-spec
-;;   '((:data-type     u32r)
-;;     (eval (progn
-;;             (let ((type (bindat-get-field struct :data-type)))
-;;               (message "Data type: %s" type))))
-;;     (union (:data-type)
-;;            (4 (struct string-spec);; (progn
-;;                 ;; ;;(setq string-size last)
-;;                 ;; (struct string-spec))
-;;               )
-;;            (t (struct gdscript-debugger--my-spec)))
-;;     (eval (message "STRING: %s" (bindat-get-field struct :string-data)))
-;;     ;;(data vec (data-length) (eval (if t str str)))
-;;     (align 4)))
-
 (defun gdscript-debugger--current-packet (content offset)
   (bindat-unpack gdscript-debugger--packet-length-bindat-spec content offset))
 
@@ -245,25 +206,25 @@
              (packet-length (bindat-get-field packet-length-data :packet-length))
              (next-packet-offset (+ 4 offset packet-length)))
         ;;(message "packet-length-data: %s" packet-length-data)
-        (message "offset %s packet-length     : %s" offset packet-length)
+        ;;(message "offset %s packet-length     : %s" offset packet-length)
         (if (< next-packet-offset content-length)
             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-              (message "packet-data %s - %s       : %s %s %s" (+ 4 offset)  next-packet-offset (type-of packet-data) (type-of (car packet-data)) (car packet-data))
+              ;;(message "packet-data %s - %s       : %s %s %s" (+ 4 offset)  next-packet-offset (type-of packet-data) (type-of (car packet-data)) (car packet-data))
               (iter-yield packet-data)
               (setq offset next-packet-offset))
           (progn
             (setq gdscript-debugger--previous-packet-data (substring content offset content-length))
 
-            (message "UPS, we need more data!!!!!!!!!!!!!!!!!!!!!!!!!!! %s %s" next-packet-offset content-length)
+            ;;(message "UPS, we need more data!!!!!!!!!!!!!!!!!!!!!!!!!!! %s %s" next-packet-offset content-length)
             (cond
              ((eq next-packet-offset content-length)
-              (message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
-              (message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
+              ;;(message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
+              ;;(message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
               (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
                 (iter-yield packet-data)
                 (setq gdscript-debugger--previous-packet-data nil)
-                (message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data))
-              ))
+                ;;(message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data)
+                )))
             (setq offset next-packet-offset) ;; to break out of loop
             ))))))
 
@@ -279,7 +240,6 @@
 (defsubst get-string (struct-data)
   (bindat-get-field struct-data :string-data))
 
-
 (defsubst to-rid (struct-data)
   (rid-create))
 
@@ -287,6 +247,9 @@
   (let ((x (bindat-get-field struct-data :x))
         (y (bindat-get-field struct-data :y)))
     (vector2-create :x x :y y)))
+
+(defsubst to-null (struct-data)
+  (prim-null-create))
 
 (defsubst to-boolean (struct-data)
   (prim-bool-create :value (if (eq 1 (get-boolean struct-data))
@@ -310,15 +273,18 @@
     (dictionary-create :elements (to-dic items))))
 
 (defun to-dic (xs)
-  (let ((variables))
-    (loop for (k v) on xs by (function cddr)
-          do (setq variables (cons (from-key-value k v) variables)))
-    variables))
+  (cl-loop for (key value) on xs by 'cddr
+           collect (from-key-value key value)))
+
+(defsubst to-pool-vector2-array (struct-data)
+  (let* ((items (bindat-get-field struct-data :items)))
+    (pool-vector2-array-create :elements (mapcar 'to-vector2 items))))
 
 (defun from-key-value (key value)
   (let* ((var-name (bindat-get-field key :string-data))
          (var-type (bindat-get-field value :data-type))
          (var-val (pcase var-type
+                    (0 (to-null value))
                     (1 (to-boolean value))
                     (2 (to-integer value))
                     (3 (to-float value))
@@ -326,21 +292,14 @@
                     (5 (to-vector2 value))
                     (16 (to-rid value))
                     ((pred (= (+ 17 (lsh 1 16)))) (to-object-id value))
-                    (18 (to-dictionary value)))))
+                    (18 (to-dictionary value))
+                    (24 (to-pool-vector2-array value)))))
     `(,var-name . ,var-val)))
 
-;; ((:items
-;;((:string-data . file) (:data-length . 4) (:data-type . 4))
-;;((:string-data . res://scenes/world/Player.gd) (:data-length . 28) (:data-type . 4))
-;;((:string-data . line) (:data-length . 4) (:data-type . 4))
-;;((:integer-data . 151) (:data-type . 2))) (:dictionary-length . 4) (:data-type . 18))
-
-(defun stack-data-to-plist (stack-data)
+(defun to-stack-dump (stack-data)
   (pcase stack-data
     (`(,file-key, file-value, line-key, line-value, function-key, function-value, id-key, id-value)
-     `(file ,(get-string file-value)
-            line ,(get-integer line-value)
-            function ,(get-string function-value)))))
+     (stack-dump-create :file (get-string file-value) :line (get-integer line-value) :function-name (get-string function-value)))))
 
 (defun error-data-to-plist (error-data)
   (pcase error-data
@@ -377,14 +336,16 @@
              (var-value (iter-next iter))
              (var-type (bindat-get-field var-value :data-type))
              (var-val (pcase var-type
-                (1 (to-boolean var-value))
-                (2 (to-integer var-value))
-                (3 (to-float var-value))
-                (4 (to-string var-value))
-                (5 (to-vector2 var-value))
-                (16 (to-rid var-value))
-                ((pred (= (+ 17 (lsh 1 16)))) (to-object-id var-value))
-                (18 (to-dictionary var-value)))))
+                        (0 (to-null var-value))
+                        (1 (to-boolean var-value))
+                        (2 (to-integer var-value))
+                        (3 (to-float var-value))
+                        (4 (to-string var-value))
+                        (5 (to-vector2 var-value))
+                        (16 (to-rid var-value))
+                        ((pred (= (+ 17 (lsh 1 16)))) (to-object-id var-value))
+                        (18 (to-dictionary var-value))
+                        (24 (to-pool-vector2-array var-value)))))
         ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
         ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
 
@@ -394,25 +355,17 @@
 (defun mk-stack-frame-vars (iter)
   (let* ((total-size (get-integer (iter-next iter)))
          (locals-size (get-integer (iter-next iter)))
-         (var-names (read-var-names iter locals-size))
+         (locals (read-var-names iter locals-size))
          (members-size (get-integer (iter-next iter)))
-         (members-names (read-var-names iter members-size))
+         (members (read-var-names iter members-size))
          (globals-size (get-integer (iter-next iter)))
-         (globals-names (read-var-names iter globals-size)))
-
-    `(command "stack_frame_vars"
-              total-size ,total-size
-              locals-size ,locals-size
-              var-names, var-names
-              members-size ,members-size
-              members-names ,members-names
-              globals-size ,globals-size
-              globals-names ,globals-names)))
+         (globals (read-var-names iter globals-size)))
+    (stack-frame-vars-create :locals locals :members members :globals globals)))
 
 (defun mk-stack-dump (iter)
   (let ((stack-level-count (get-integer (iter-next iter)))
         (stack-data (bindat-get-field (iter-next iter) :items)))
-    `(command "stack_dump" stack-dump , (stack-data-to-plist stack-data))))
+    (to-stack-dump stack-data)))
 
 (defun mk-output (iter)
   (let ((output-count (bindat-get-field (iter-next iter) :integer-data))
@@ -443,9 +396,9 @@
 (defsubst gdscript-debugger--drop-res (file-path)
   (substring file-path (length "res://")))
 
-(defun gdscript-debugger--on-stack-dump (plist)
-  (let* ((file (plist-get plist 'file))
-         (line (plist-get plist 'line))
+(defun gdscript-debugger--on-stack-dump (stuck-dump)
+  (let* ((file (stack-dump->file stuck-dump))
+         (line (stack-dump->line stuck-dump))
          (project-root (gdscript-util--find-project-configuration-file))
          (full-file-path (concat project-root (gdscript-debugger--drop-res file))))
     (with-current-buffer (find-file full-file-path)
@@ -456,8 +409,8 @@
 
 (defun gdscript-debugger--handle-server-reply (process content)
   "Gets invoked whenever the server sends data to the client."
-  (message "(DATA received): %s" (length content))
-  (message "(Old DATA): %s" (length gdscript-debugger--previous-packet-data))
+  ;;(message "(DATA received): %s" (length content))
+  ;;(message "(Old DATA): %s" (length gdscript-debugger--previous-packet-data))
 
   (condition-case x
       (let ((iter (command-iter content)))
@@ -475,90 +428,34 @@
             ("error" (let ((cmd (mk-error iter)))
                        (message "Error: %s" cmd)))
             ("performance" (let ((cmd (mk-performance iter)))
-                             (message "Performace: %s" cmd)))
+                             ;; (message "Performace: %s" cmd)
+                             ))
             ("stack_dump" (let ((cmd (mk-stack-dump iter)))
-                            (message "Stack dump %s" cmd)
-                            (gdscript-debugger--on-stack-dump (plist-get cmd 'stack-dump))))
+                            ;;(message "Stack dump %s" cmd)
+                            (gdscript-debugger--on-stack-dump cmd)))
             ("stack_frame_vars" (let ((cmd (mk-stack-frame-vars iter)))
-                            (message "Stack frame vars %s" cmd))))))
+                                  (with-current-buffer (gdscript-debugger--get-locals-buffer)
+                                    (let ((inhibit-read-only t))
+                                      (erase-buffer)
+                                      (insert "Locals:\n")
+                                      (dolist (local (stack-frame-vars->locals cmd))
+                                        (insert (car local))
+                                        (insert (format ": %s\n" (cdr local))))
+                                      (insert "\nMembers:\n")
+                                      (dolist (member (stack-frame-vars->members cmd))
+                                        (insert (car member))
+                                        (insert (format ": %s\n" (cdr member))))
+                                      (insert "\nGlobals:\n")
+                                      (dolist (global (stack-frame-vars->globals cmd))
+                                        (insert (car global))
+                                        (insert (format ": %s\n" (cdr global)))))
+                                    (display-buffer (current-buffer)))
+                                  ;; (message "Stack frame vars %s" cmd)
+                                  )))))
     (iter-end-of-sequence (message "No more packets to process %s" x))))
-
-  ;;(message "(stringp content): %s" (stringp content))
-  ;;(message "(type-of content): %s" (type-of content))
-
-  ;;(content-2 (concat previous-packet-data content))
-
-  ;; (let* ((content (concat gdscript-debugger--previous-packet-data content))
-  ;;        (content-length (length content))
-  ;;        (offset 0)
-  ;;        (plist))
-  ;;   (message "(content received): %s" (length content))
-  ;;   (while (< offset content-length)
-  ;;     (let* ((packet-length-data (gdscript-debugger--current-packet content offset))
-  ;;            (packet-length (bindat-get-field packet-length-data :packet-length))
-  ;;            (next-packet-offset (+ 4 offset packet-length)))
-  ;;       ;;(message "packet-length-data: %s" packet-length-data)
-  ;;       (message "offset %s packet-length     : %s" offset packet-length)
-  ;;       (if (< next-packet-offset content-length)
-  ;;           (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-  ;;             (message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
-  ;;             (setq offset next-packet-offset))
-  ;;         (progn
-  ;;           (setq gdscript-debugger--previous-packet-data (substring content offset content-length))
-  ;;
-  ;;           (message "UPS, we need more data!!!!!!!!!!!!!!!!!!!!!!!!!!! %s %s" next-packet-offset content-length)
-  ;;           (cond
-  ;;            ((eq next-packet-offset content-length)
-  ;;             (message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
-  ;;             (message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
-  ;;             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-  ;;               (message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data))
-  ;;             ))
-  ;;           (setq offset next-packet-offset) ;; to break out of loop
-  ;;           )))))
-  ;;(message "(DATA processed): %s" (length content)))
-
-;; (defun ignore-handler (packet-data plist name))
-;;
-;; (defmacro gd-string-handler (packet-data plist name)
-;;   (let ((string (bindat-get-field ,packet-data :string-data)))
-;;     (setq ,plist (plist-put ,plist ,name string))))
-;;
-;; (defmacro gd-boolean-handler (packet-data plist name)
-;;   `(pcase (bindat-get-field ,packet-data :boolean-data)
-;;   ;;`(pcase ,packet-data
-;;     (0 (setq ,plist (plist-put ,plist ,name nil)))
-;;     (1 (setq ,plist (plist-put ,plist ,name t)))))
-;;
-;; ;; (bindat-get-field '((stopped-threads . "all") (thread-id . "1") (reason . "end-stepping-range")) 'reason)
-;;
-;; (defun plist-test(x)
-;;   (let ((plist))
-;;     (gd-boolean-handler x plist 'hello)
-;;     (message "HERE %s" plist)))
-;;
-;; ;; continuation handling http://web.mit.edu/Emacs/source/emacs/lisp/server.el
-;;
-;; (plist-get '(command "debug_enter" can-continue t reason "Breakpoint") 'reason)
-;;
-;; (defun command-dispatcher (packet-data)
-;;   (pcase (bindat-get-field packet-data :string-data)
-;;     ;; packet_peer_stream->put_var("debug_enter");
-;;     ;; packet_peer_stream->put_var(2);
-;;     ;; packet_peer_stream->put_var(p_can_continue);
-;;     ;; packet_peer_stream->put_var(p_script->debug_get_error());
-;;     ("debug_enter" '(ignore-handler gd-boolean-handler gd-string-handler))
-;;     ("debug_exit")
-;;     ("output")
-;;     ("error")
-;;     ("performance"))
-;;   )
-
-;;(defvar current-process nil)
 
 (defvar server-clients '()
   "List with client processes")
-
 
 (defun gdscript-debugger--sentinel-function (process event)
   "Gets called when the status of the network connection changes."
@@ -689,6 +586,8 @@
 (defun boolean-to-integer (b)
   (if (null b) 0 1))
 
+;; (print (symbol-function 'gdscript-debugger--get-stack-frame-vars))
+
 (defun gdscript-debugger--get-stack-frame-vars (frame)
   (let* ((command "get_stack_frame_vars")
          (command-length (length command))
@@ -738,11 +637,11 @@
     (align 4)))
 
 (defun gdscript-debugger--command (command)
-  (message "(gdscript-debugger--packet-definition (length command)): %s" (gdscript-debugger--packet-definition (length command)))
+  ;;(message "(gdscript-debugger--packet-definition (length command)): %s" (gdscript-debugger--packet-definition (length command)))
   (let* ((command-alength (align-length command))
          (packet-length (+ (* 4 4) command-alength)))
-    (message "packet-length: %s" packet-length)
-    (message "command-alength: %s" command-alength)
+    ;; (message "packet-length: %s" packet-length)
+    ;; (message "command-alength: %s" command-alength)
     (bindat-pack
      (gdscript-debugger--packet-definition (length command))
      `((:packet-length . ,packet-length)
@@ -828,38 +727,37 @@ BUFFER nil or omitted means use the current buffer."
 
 ;; (rid-create)
 
-(cl-defstruct (object-id (:constructor object-id-create)
-                         (:copier nil)
-                         (:conc-name object-id->))
-  value)
+(cl-defstruct (prim-null (:constructor prim-null-create)
+                         (:copier nil)))
 
 (cl-defstruct (prim-bool (:constructor prim-bool-create)
-                       (:copier nil)
-                       (:conc-name boolean->))
+                         (:copier nil)
+                         (:conc-name boolean->))
   value)
 
 (cl-defstruct (prim-integer (:constructor prim-integer-create)
-                       (:copier nil)
-                       (:conc-name integer->))
+                            (:copier nil)
+                            (:conc-name integer->))
   value)
 
 (cl-defstruct (prim-float (:constructor prim-float-create)
-                     (:copier nil)
-                     (:conc-name float->))
+                          (:copier nil)
+                          (:conc-name float->))
   value)
 
 (cl-defstruct (prim-string (:constructor prim-string-create)
-                      (:copier nil)
-                      (:conc-name string->))
+                           (:copier nil)
+                           (:conc-name string->))
   value)
 
 (cl-defstruct (rid (:constructor rid-create)
                    (:copier nil)))
 
-(cl-defstruct (pool-vector2-array (:constructor pool-vector2-array-create)
-                                  (:copier nil)
-                                  (:conc-name pool-vector2-array->))
-  elements)
+(cl-defstruct (object-id (:constructor object-id-create)
+                         (:copier nil)
+                         (:conc-name object-id->))
+  value)
+
 
 (cl-defstruct (dictionary (:constructor dictionary-create)
                           (:copier nil)
@@ -870,6 +768,67 @@ BUFFER nil or omitted means use the current buffer."
                        (:copier nil)
                        (:conc-name vector2->))
   x y)
+
+(cl-defstruct (pool-vector2-array (:constructor pool-vector2-array-create)
+                                  (:copier nil)
+                                  (:conc-name pool-vector2-array->))
+  elements)
+
+(cl-defstruct (stack-frame-vars (:constructor stack-frame-vars-create)
+                                (:copier nil)
+                                (:conc-name stack-frame-vars->))
+  locals members globals)
+
+(cl-defstruct (stack-dump (:constructor stack-dump-create)
+                          (:copier nil)
+                          (:conc-name stack-dump->))
+  file line function-name)
+
+(defun gdscript-debugger--parent-mode ()
+  "Generic mode to derive all other buffer modes from."
+  (kill-all-local-variables)
+  (setq buffer-read-only t)
+  (buffer-disable-undo))
+
+(defvar gdscript-debugger--stack-dump-mode-map
+  (let ((map (make-sparse-keymap)))
+    (suppress-keymap map)
+    (define-key map "q" 'kill-current-buffer)
+    map))
+
+(defvar-local gdscript-debugger--buffer-type nil
+  "One of the symbols bound in `gdscript-debugger--get-buffer-create'.")
+
+(defun gdscript-debugger--get-buffer (buffer-type)
+  "Get a specific buffer.
+
+In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
+  (catch 'found
+    (dolist (buffer (buffer-list) nil)
+      (with-current-buffer buffer
+        (when (eq gdscript-debugger--buffer-type buffer-type)
+          (throw 'found buffer))))))
+
+(defun gdscript-debugger--get-locals-buffer ()
+  (gdscript-debugger--get-buffer-create 'stack-dump))
+
+(defun gdscript-debugger-display-stack-dump-buffer ()
+  "Display the variables of current stack."
+  (interactive)
+  (display-buffer (gdscript-debugger--get-buffer-create 'stack-dump)))
+
+(defun gdscript-debugger--get-buffer-create (buffer-type)
+  (or (gdscript-debugger--get-buffer buffer-type)
+      (let ((new (generate-new-buffer "Stack dump")))
+        (with-current-buffer new
+          (gdscript-debugger--stack-dump-mode)
+          (setq gdscript-debugger--buffer-type buffer-type)
+          (setq mode-name "Locals: ")
+          (current-buffer)))))
+
+(define-derived-mode gdscript-debugger--stack-dump-mode gdscript-debugger--parent-mode "Stack Dump"
+  "Major mode for stack dump."
+  (setq header-line-format "Stack dump"))
 
 
 
