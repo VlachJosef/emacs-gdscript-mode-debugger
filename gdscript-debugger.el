@@ -74,24 +74,8 @@
     (align 4)))
 
 (defvar gdscript-debugger--vector2-spec
-  '((:float-byte-a byte)
-    (:float-byte-b byte)
-    (:float-byte-c byte)
-    (:float-byte-d byte)
-    (:x eval (bitpack--load-f32
-                        (bindat-get-field struct :float-byte-d)
-                        (bindat-get-field struct :float-byte-c)
-                        (bindat-get-field struct :float-byte-b)
-                        (bindat-get-field struct :float-byte-a)))
-    (:float-byte-e byte)
-    (:float-byte-f byte)
-    (:float-byte-g byte)
-    (:float-byte-h byte)
-    (:y eval (bitpack--load-f32
-                        (bindat-get-field struct :float-byte-h)
-                        (bindat-get-field struct :float-byte-g)
-                        (bindat-get-field struct :float-byte-f)
-                        (bindat-get-field struct :float-byte-e)))))
+  `(,@(capture-float-spec :x)
+    ,@(capture-float-spec :y)))
 
 (defvar gdscript-debugger--dictionary-spec
   '((:elements u32r)
@@ -119,7 +103,44 @@
     ;;(eval (message "AFTER  IN A ARRAY %s" last))
     ))
 
-(defvar gdscript-debugger--rid-spec nil) ;; (unsupported)
+;;(print (macroexpand '(capture-float-spec :hi)))
+
+(defsubst to-symbol (symbol-name &optional suffix)
+  (intern (concat (symbol-name symbol-name) suffix)))
+
+(defmacro capture-float-spec (symbol-name)
+  (let ((symbol-a (to-symbol symbol-name "-a"))
+        (symbol-b (to-symbol symbol-name "-b"))
+        (symbol-c (to-symbol symbol-name "-c"))
+        (symbol-d (to-symbol symbol-name "-d"))
+        (symbol (to-symbol symbol-name)))
+    `(quote ((,symbol-a byte)
+             (,symbol-b byte)
+             (,symbol-c byte)
+             (,symbol-d byte)
+             (,symbol eval (bitpack--load-f32
+                            (bindat-get-field struct ,symbol-d)
+                            (bindat-get-field struct ,symbol-c)
+                            (bindat-get-field struct ,symbol-b)
+                            (bindat-get-field struct ,symbol-a)))))))
+
+(defvar gdscript-debugger--color-spec
+  `(,@(capture-float-spec :red)
+    ,@(capture-float-spec :green)
+    ,@(capture-float-spec :blue)
+    ,@(capture-float-spec :alpha)))
+
+(defvar gdscript-debugger--node-path-spec
+  '((:data-length u32r)
+    (:new-format eval (logand (bindat-get-field struct :data-length) #x80000000))
+    (:name-count eval (logand (bindat-get-field struct :data-length) #x7FFFFFFF))
+    (:sub-name-count u32)
+    (:total eval (+ (bindat-get-field struct :name-count) (bindat-get-field struct :sub-name-count) ))
+    (:flags u32)
+    (:absolute eval (not (eq 0 (logand (bindat-get-field struct :flags) #x1))))
+    (:items repeat (:total) (struct gdscript-debugger--string-spec))))
+
+(defvar gdscript-debugger--rid-spec nil) ;; unsupported
 
 (defvar gdscript-debugger--object-as-id
   '((:object-as-id-a u32r)
@@ -136,8 +157,6 @@
 (defvar gdscript-debugger--unknown-spec-11 '((eval (message "IN A SPEC 11"))))
 (defvar gdscript-debugger--unknown-spec-12 '((eval (message "IN A SPEC 12"))))
 (defvar gdscript-debugger--unknown-spec-13 '((eval (message "IN A SPEC 13"))))
-(defvar gdscript-debugger--unknown-spec-14 '((eval (message "IN A SPEC 14"))))
-(defvar gdscript-debugger--unknown-spec-15 '((eval (message "IN A SPEC 15"))))
 (defvar gdscript-debugger--unknown-spec-17 '((eval (message "IN A SPEC 17"))))
 (defvar gdscript-debugger--unknown-spec-20 '((eval (message "IN A SPEC 20"))))
 (defvar gdscript-debugger--unknown-spec-21 '((eval (message "IN A SPEC 21"))))
@@ -168,8 +187,8 @@
            (11 (struct gdscript-debugger--unknown-spec-11))
            (12 (struct gdscript-debugger--unknown-spec-12))
            (13 (struct gdscript-debugger--unknown-spec-13))
-           (14 (struct gdscript-debugger--unknown-spec-14))
-           (15 (struct gdscript-debugger--unknown-spec-15))
+           (14 (struct gdscript-debugger--color-spec))
+           (15 (struct gdscript-debugger--node-path-spec))
            (16 (struct gdscript-debugger--rid-spec))
            (17 (struct gdscript-debugger--unknown-spec-17))
            (,(+ 17 (lsh 1 16)) (struct gdscript-debugger--object-as-id))
@@ -240,6 +259,22 @@
 (defsubst get-string (struct-data)
   (bindat-get-field struct-data :string-data))
 
+(defsubst get-array (struct-data)
+  (bindat-get-field struct-data :items))
+
+(defsubst to-color (struct)
+  (let ((red (bindat-get-field struct :red))
+        (green (bindat-get-field struct :green))
+        (blue (bindat-get-field struct :blue))
+        (alpha (bindat-get-field struct :alpha)))
+    (color-create :red red :green green :blue blue :alpha alpha)))
+
+(defsubst to-node-path (struct)
+  (let ((path (mapcar 'to-string (bindat-get-field struct :items)))
+        (subpath nil) ;; TODO what is subpath
+        (absolute (bindat-get-field struct :absolute)))
+    (node-path-create :path path :subpath subpath :absolute absolute)))
+
 (defsubst to-rid (struct-data)
   (rid-create))
 
@@ -290,11 +325,29 @@
                     (3 (to-float value))
                     (4 (to-string value))
                     (5 (to-vector2 value))
+                    (14 (to-color value))
+                    (15 (to-node-path value))
                     (16 (to-rid value))
                     ((pred (= (+ 17 (lsh 1 16)))) (to-object-id value))
                     (18 (to-dictionary value))
                     (24 (to-pool-vector2-array value)))))
     `(,var-name . ,var-val)))
+
+(defun from-variant (struct)
+  (let ((var-type (bindat-get-field struct :data-type)))
+    (pcase var-type
+      (0 (to-null struct))
+      (1 (to-boolean struct))
+      (2 (to-integer struct))
+      (3 (to-float struct))
+      (4 (to-string struct))
+      (5 (to-vector2 struct))
+      (14 (to-color struct))
+      (15 (to-node-path struct))
+      (16 (to-rid struct))
+      ((pred (= (+ 17 (lsh 1 16)))) (to-object-id struct))
+      (18 (to-dictionary struct))
+      (24 (to-pool-vector2-array struct)))))
 
 (defun to-stack-dump (stack-data)
   (pcase stack-data
@@ -361,6 +414,33 @@
          (globals-size (get-integer (iter-next iter)))
          (globals (read-var-names iter globals-size)))
     (stack-frame-vars-create :locals locals :members members :globals globals)))
+
+(defun to-property-info (properties)
+  (let ((property-info))
+    (dolist (property properties)
+      (when (eq 6 (bindat-get-field property :array-length))
+        (let* ((data (bindat-get-field property :items))
+               (name (bindat-get-field (car data) :string-data))
+               (type (bindat-get-field (nth 1 data) :integer-data))
+               (hint (bindat-get-field (nth 2 data) :integer-data))
+               (hint-string (bindat-get-field (nth 3 data) :string-data))
+               (usage (bindat-get-field (nth 4 data) :integer-data))
+               (variant (from-variant (nth 5 data))))
+          (push (property-info-create
+                 :name name
+                 :type type
+                 :hint hint
+                 :hint-string hint-string
+                 :usage usage
+                 :variant variant) property-info))))
+    property-info))
+
+(defun mk-inspect-object (iter)
+  (let ((three (get-integer (iter-next iter)))
+        (object-id (get-integer (iter-next iter)))
+        (class (get-string (iter-next iter)))
+        (properties (get-array (iter-next iter))))
+    (inspect-object-create :object-id object-id :class class :properties (to-property-info properties))))
 
 (defun mk-stack-dump (iter)
   (let ((stack-level-count (get-integer (iter-next iter)))
@@ -433,26 +513,31 @@
             ("stack_dump" (let ((cmd (mk-stack-dump iter)))
                             ;;(message "Stack dump %s" cmd)
                             (gdscript-debugger--on-stack-dump cmd)))
+            ("message:inspect_object" (let ((cmd (mk-inspect-object iter)))
+                                        (message "message:inspect_object: %s" cmd)))
             ("stack_frame_vars" (let ((cmd (mk-stack-frame-vars iter)))
                                   (with-current-buffer (gdscript-debugger--get-locals-buffer)
                                     (let ((inhibit-read-only t))
                                       (erase-buffer)
                                       (insert "Locals:\n")
                                       (dolist (local (stack-frame-vars->locals cmd))
-                                        (insert (car local))
+                                        (insert (gdscript-debugger--variable-name (car local)))
                                         (insert (format ": %s\n" (cdr local))))
                                       (insert "\nMembers:\n")
                                       (dolist (member (stack-frame-vars->members cmd))
-                                        (insert (car member))
+                                        (insert (gdscript-debugger--variable-name (car member)))
                                         (insert (format ": %s\n" (cdr member))))
                                       (insert "\nGlobals:\n")
                                       (dolist (global (stack-frame-vars->globals cmd))
-                                        (insert (car global))
+                                        (insert (gdscript-debugger--variable-name (car global)))
                                         (insert (format ": %s\n" (cdr global)))))
                                     (display-buffer (current-buffer)))
                                   ;; (message "Stack frame vars %s" cmd)
                                   )))))
     (iter-end-of-sequence (message "No more packets to process %s" x))))
+
+(defun gdscript-debugger--variable-name (var-name)
+  (propertize (format "%25s" var-name) 'font-lock-face font-lock-variable-name-face))
 
 (defvar server-clients '()
   "List with client processes")
@@ -485,6 +570,11 @@
      (_ (message "More than one game process running"))))
 
 ;;(print (macroexpand '(gdscript-debugger--send-command server-process (message "HIII %s" server-process))))
+
+(defun gdscript-debugger-inspect-object()
+  (interactive)
+  (gdscript-debugger--send-command
+    (gdscript-debugger--inspect-object (object-id-create :value 1538))))
 
 (defun gdscript-debugger-get-stack-dump()
   (interactive)
@@ -548,6 +638,17 @@
 ;;          ))
 ;;     (_ (message "UNKNOWN TYPE %s" type))))
 
+(defun gdscript-debugger--inspect-object-definition (command-length)
+  `((:packet-length u32r)
+    (:array-type u32r)
+    (:elements-count u32r)
+    (:command-type u32r)
+    (:command-length u32r)
+    (:command str ,command-length)
+    (align 4)
+    (:object-id-type u32r)
+    (:object-id u32r)))
+
 (defun gdscript-debugger--get-stack-frame-vars-definition (command-length)
   `((:packet-length u32r)
     (:array-type u32r)
@@ -587,6 +688,22 @@
   (if (null b) 0 1))
 
 ;; (print (symbol-function 'gdscript-debugger--get-stack-frame-vars))
+
+(defun gdscript-debugger--inspect-object (object-id)
+  (let* ((command "inspect_object")
+         (command-length (length command))
+         (command-alength (align-length command))
+         (packet-length (+ (* 6 4) command-alength))
+         (spec (gdscript-debugger--inspect-object-definition command-length)))
+    (bindat-pack spec
+     `((:packet-length . ,packet-length)
+       (:array-type . ,variant-array)
+       (:elements-count . 2)
+       (:command-type . ,variant-string)
+       (:command-length . ,command-length)
+       (:command . ,command)
+       (:object-id-type . ,variant-integer)
+       (:object-id . ,(object-id->value object-id))))))
 
 (defun gdscript-debugger--get-stack-frame-vars (frame)
   (let* ((command "get_stack_frame_vars")
@@ -750,6 +867,16 @@ BUFFER nil or omitted means use the current buffer."
                            (:conc-name string->))
   value)
 
+(cl-defstruct (color (:constructor color-create)
+                         (:copier nil)
+                         (:conc-name color->))
+  red green blue alpha)
+
+(cl-defstruct (node-path (:constructor node-path-create)
+                         (:copier nil)
+                         (:conc-name node-path->))
+  path subpath absolute)
+
 (cl-defstruct (rid (:constructor rid-create)
                    (:copier nil)))
 
@@ -783,6 +910,16 @@ BUFFER nil or omitted means use the current buffer."
                           (:copier nil)
                           (:conc-name stack-dump->))
   file line function-name)
+
+(cl-defstruct (inspect-object (:constructor inspect-object-create)
+                              (:copier nil)
+                              (:conc-name inspect-object->))
+  object-id class properties)
+
+(cl-defstruct (property-info (:constructor property-info-create)
+                             (:copier nil)
+                             (:conc-name property-info->))
+  name type hint hint-string usage variant)
 
 (defun gdscript-debugger--parent-mode ()
   "Generic mode to derive all other buffer modes from."
