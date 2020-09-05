@@ -19,10 +19,6 @@
 (require 'bindat)
 (require 'generator)
 
-;; (eval (if (eq (bindat-get-field struct 'data-type) 4) str byte))
-
-;; gdscript-debugger
-
 ;; Overlay arrow markers
 (defvar gdscript-debugger--thread-position nil)
 
@@ -33,6 +29,13 @@
 
 (defvar gdscript-debugger--integer-spec
   '((:integer-data u32r)))
+
+(defvar gdscript-debugger--integer-64-spec
+  '((:data-a u32r)
+    (:data-b u32r)
+    (:integer-data eval (let ((a (bindat-get-field struct :data-a))
+                              (b (bindat-get-field struct :data-b)))
+                          (logior (lsh b 32) a)))))
 
 ;; Credit goes to https://github.com/skeeto/bitpack/blob/master/bitpack.el
 (defsubst bitpack--load-f32 (b0 b1 b2 b3)
@@ -51,57 +54,79 @@
         (- result)
       result)))
 
+(defsubst bitpack--load-f64 (b0 b1 b2 b3 b4 b5 b6 b7)
+  (let* ((negp (= #x80 (logand b0 #x80)))
+         (exp (logand (logior (ash b0 4) (ash b1 -4)) #x7ff))
+         (mantissa (logior #x10000000000000
+                           (ash (logand #xf b1) 48)
+                           (ash b2 40)
+                           (ash b3 32)
+                           (ash b4 24)
+                           (ash b5 16)
+                           (ash b6  8)
+                           b7))
+         (result (if (= #x7ff exp)
+                     (if (= #x10000000000000 mantissa)
+                         1.0e+INF
+                       0.0e+NaN)
+                   (ldexp (ldexp mantissa -53) (- exp 1022)))))
+    (if negp
+        (- result)
+      result)))
+
 (defvar gdscript-debugger--float-spec
-  '((:float-byte-a byte)
-    (:float-byte-b byte)
-    (:float-byte-c byte)
-    (:float-byte-d byte)
-    (:float-value eval (bitpack--load-f32
-                        (bindat-get-field struct :float-byte-d)
-                        (bindat-get-field struct :float-byte-c)
-                        (bindat-get-field struct :float-byte-b)
-                        (bindat-get-field struct :float-byte-a)))
-    ;; (eval (progn
-    ;;         (message "IN A FLOAT %s" last)
-    ;;         ;; (gd-bytes last)
-    ;;         )
-    ;;       )
-    ))
+  '((:vect vec 4 byte)
+    (:float-value eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
+                         (apply 'bitpack--load-f32 alist)))))
+
+(defvar gdscript-debugger--float-64-spec
+  '((:vect vec 8 byte)
+    (:float-value eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
+                         (apply 'bitpack--load-f64 alist)))))
 
 (defvar gdscript-debugger--string-spec
   '((:data-length u32r)
     (:string-data str (:data-length))
     (align 4)))
 
+(defvar gdscript-debugger--string-z-spec
+  '((:data-length u32r)
+    (:string-data strz (:data-length))
+    (align 4)))
+
 (defvar gdscript-debugger--vector2-spec
   `(,@(capture-float-spec :x)
     ,@(capture-float-spec :y)))
 
+(defvar gdscript-debugger--vector3-spec
+  `(,@(capture-float-spec :x)
+    ,@(capture-float-spec :y)
+    ,@(capture-float-spec :z)))
+
 (defvar gdscript-debugger--dictionary-spec
-  '((:elements u32r)
+  '((:data u32r)
+    (:shared   eval (logand (bindat-get-field struct :data) #x80000000))
+    (:elements eval (logand (bindat-get-field struct :data) #x7fffffff))
     (:dictionary-length eval (* 2 last))
     (:items repeat (:dictionary-length) (struct godot-data-bindat-spec))))
 
 (defvar gdscript-debugger--array-spec
+  '((:data u32r)
+    (:shared       eval (logand (bindat-get-field struct :data) #x80000000))
+    (:array-length eval (logand (bindat-get-field struct :data) #x7fffffff))
+    (:items repeat (:array-length) (struct godot-data-bindat-spec))))
+
+(defvar gdscript-debugger--pool-int-array-spec
   '((:array-length u32r)
-    ;;(:string-data str (:data-length))
-    ;;(align 4)
-    ;;(logand (bindat-get-field struct :array-length) #x7FFFFFFF)
-    ;;(eval (message "ARRAY size: %s" last))
-    (:items repeat (:array-length) (struct godot-data-bindat-spec))
-    ;;(eval (message "AFTER  IN A ARRAY %s" last))
-    ))
+    (:items repeat (:array-length) (struct gdscript-debugger--integer-spec))))
+
+(defvar gdscript-debugger--pool-string-array-spec
+  '((:array-length u32r)
+    (:items repeat (:array-length) (struct gdscript-debugger--string-z-spec))))
 
 (defvar gdscript-debugger--pool-vector-2-array-spec
   '((:array-length u32r)
-    ;;(:string-data str (:data-length))
-    ;;(align 4)
-    ;;(logand (bindat-get-field struct :array-length) #x7FFFFFFF)
-    ;;(eval (message "pool-vector-2-array-spec size: %s" last))
-    (:items repeat (:array-length) (struct gdscript-debugger--vector2-spec))
-    ;;(:items repeat (:array-length) (struct godot-data-bindat-spec))
-    ;;(eval (message "AFTER  IN A ARRAY %s" last))
-    ))
+    (:items repeat (:array-length) (struct gdscript-debugger--vector2-spec))))
 
 ;;(print (macroexpand '(capture-float-spec :hi)))
 
@@ -109,20 +134,24 @@
   (intern (concat (symbol-name symbol-name) suffix)))
 
 (defmacro capture-float-spec (symbol-name)
-  (let ((symbol-a (to-symbol symbol-name "-a"))
-        (symbol-b (to-symbol symbol-name "-b"))
-        (symbol-c (to-symbol symbol-name "-c"))
-        (symbol-d (to-symbol symbol-name "-d"))
-        (symbol (to-symbol symbol-name)))
-    `(quote ((,symbol-a byte)
-             (,symbol-b byte)
-             (,symbol-c byte)
-             (,symbol-d byte)
-             (,symbol eval (bitpack--load-f32
-                            (bindat-get-field struct ,symbol-d)
-                            (bindat-get-field struct ,symbol-c)
-                            (bindat-get-field struct ,symbol-b)
-                            (bindat-get-field struct ,symbol-a)))))))
+  (let ((symbol (to-symbol symbol-name)))
+    `(quote ((:vect vec 4 byte)
+             (,symbol eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
+                             (apply 'bitpack--load-f32 alist)))))))
+
+(defvar gdscript-debugger--plane-spec
+  `(,@(capture-float-spec :normal-x)
+    ,@(capture-float-spec :normal-y)
+    ,@(capture-float-spec :normal-z)
+    ,@(capture-float-spec :distance)))
+
+(defvar gdscript-debugger--aabb-spec
+  `(,@(capture-float-spec :x-coordinate)
+    ,@(capture-float-spec :y-coordinate)
+    ,@(capture-float-spec :z-coordinate)
+    ,@(capture-float-spec :x-size)
+    ,@(capture-float-spec :y-size)
+    ,@(capture-float-spec :z-size)))
 
 (defvar gdscript-debugger--color-spec
   `(,@(capture-float-spec :red)
@@ -149,60 +178,39 @@
                       (b (bindat-get-field struct :object-as-id-b)))
                   (logior (lsh b 32) a)))))
 
-(defvar gdscript-debugger--unknown-spec-6 '((eval (message "IN A SPEC 6"))))
-(defvar gdscript-debugger--unknown-spec-7 '((eval (message "IN A SPEC 7"))))
-(defvar gdscript-debugger--unknown-spec-8 '((eval (message "IN A SPEC 8"))))
-(defvar gdscript-debugger--unknown-spec-9 '((eval (message "IN A SPEC 9"))))
-(defvar gdscript-debugger--unknown-spec-10 '((eval (message "IN A SPEC 10"))))
-(defvar gdscript-debugger--unknown-spec-11 '((eval (message "IN A SPEC 11"))))
-(defvar gdscript-debugger--unknown-spec-12 '((eval (message "IN A SPEC 12"))))
-(defvar gdscript-debugger--unknown-spec-13 '((eval (message "IN A SPEC 13"))))
 (defvar gdscript-debugger--unknown-spec-17 '((eval (message "IN A SPEC 17"))))
-(defvar gdscript-debugger--unknown-spec-20 '((eval (message "IN A SPEC 20"))))
-(defvar gdscript-debugger--unknown-spec-21 '((eval (message "IN A SPEC 21"))))
-(defvar gdscript-debugger--unknown-spec-22 '((eval (message "IN A SPEC 22"))))
-(defvar gdscript-debugger--unknown-spec-23 '((eval (message "IN A SPEC 23"))))
-(defvar gdscript-debugger--unknown-spec-25 '((eval (message "IN A SPEC 25"))))
-(defvar gdscript-debugger--unknown-spec-26 '((eval (message "IN A SPEC 26"))))
-(defvar gdscript-debugger--unknown-spec-27 '((eval (message "IN A SPEC 27"))))
 
-(defvar gdscript-debugger--my-spec
-  '((eval (message "IN A SPEC %s %s" (bindat-get-field struct :data-type) struct))))
+(defconst encode-mask #xff)
+(defconst encode-flag-64 (lsh 1 16))
 
 (defvar godot-data-bindat-spec
-  `((:data-type     u32r)
-    ;;(:masked-data-type eval (logand (bindat-get-field struct :data-type) #xff))
-    (union (:data-type)
+  '((:type-data    u32r)
+    (:type         eval (logand last encode-mask))
+    (:flag-64      eval (logand (bindat-get-field struct :type-data) encode-flag-64))
+    (:object-as-id eval (logand (bindat-get-field struct :type-data) encode-flag-64))
+    (union (:type)
            (0 nil)
            (1 (struct gdscript-debugger--boolean-spec))
-           (2 (struct gdscript-debugger--integer-spec))
-           (3 (struct gdscript-debugger--float-spec))
+           ((eval (and (eq 2 tag) (equal 0 (bindat-get-field struct :flag-64)))) (struct gdscript-debugger--integer-spec))
+           (2 (struct gdscript-debugger--integer-64-spec))
+           ((eval (and (eq 3 tag) (equal 0 (bindat-get-field struct :flag-64)))) (struct gdscript-debugger--float-spec))
+           (3 (struct gdscript-debugger--float-64-spec))
            (4 (struct gdscript-debugger--string-spec))
            (5 (struct gdscript-debugger--vector2-spec))
-           (6 (struct gdscript-debugger--unknown-spec-6))
-           (7 (struct gdscript-debugger--unknown-spec-7))
-           (8 (struct gdscript-debugger--unknown-spec-8))
-           (9 (struct gdscript-debugger--unknown-spec-9))
-           (10 (struct gdscript-debugger--unknown-spec-10))
-           (11 (struct gdscript-debugger--unknown-spec-11))
-           (12 (struct gdscript-debugger--unknown-spec-12))
-           (13 (struct gdscript-debugger--unknown-spec-13))
+           (7 (struct gdscript-debugger--vector3-spec))
+           (9 (struct gdscript-debugger--plane-spec))
+           (11 (struct gdscript-debugger--aabb-spec))
            (14 (struct gdscript-debugger--color-spec))
            (15 (struct gdscript-debugger--node-path-spec))
            (16 (struct gdscript-debugger--rid-spec))
-           (17 (struct gdscript-debugger--unknown-spec-17))
-           (,(+ 17 (lsh 1 16)) (struct gdscript-debugger--object-as-id))
+           ((eval (and (eq 17 tag) (equal 0 (bindat-get-field struct :object-as-id)))) (error "[ObjectId] Not implemented yet"))
+           (17 (struct gdscript-debugger--object-as-id))
            (18 (struct gdscript-debugger--dictionary-spec))
            (19 (struct gdscript-debugger--array-spec))
-           (20 (struct gdscript-debugger--unknown-spec-20))
-           (21 (struct gdscript-debugger--unknown-spec-21))
-           (22 (struct gdscript-debugger--unknown-spec-22))
-           (23 (struct gdscript-debugger--unknown-spec-23))
+           (21 (struct gdscript-debugger--pool-int-array-spec))
+           (23 (struct gdscript-debugger--pool-string-array-spec))
            (24 (struct gdscript-debugger--pool-vector-2-array-spec))
-           (25 (struct gdscript-debugger--unknown-spec-25))
-           (26 (struct gdscript-debugger--unknown-spec-26))
-           (27 (struct gdscript-debugger--unknown-spec-27))
-           (t (struct gdscript-debugger--my-spec)))))
+           (t (eval (error "Unknown type: %s" tag))))))
 
 (defvar gdscript-debugger--previous-packet-data nil)
 
@@ -228,7 +236,7 @@
         ;;(message "offset %s packet-length     : %s" offset packet-length)
         (if (< next-packet-offset content-length)
             (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-              ;;(message "packet-data %s - %s       : %s %s %s" (+ 4 offset)  next-packet-offset (type-of packet-data) (type-of (car packet-data)) (car packet-data))
+              ;;(message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
               (iter-yield packet-data)
               (setq offset next-packet-offset))
           (progn
@@ -242,7 +250,7 @@
               (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
                 (iter-yield packet-data)
                 (setq gdscript-debugger--previous-packet-data nil)
-                ;;(message "packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data)
+                ;;(message "LAST packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data)
                 )))
             (setq offset next-packet-offset) ;; to break out of loop
             ))))))
@@ -261,6 +269,32 @@
 
 (defsubst get-array (struct-data)
   (bindat-get-field struct-data :items))
+
+(defsubst to-plane (struct)
+  (let ((normal-x (bindat-get-field struct :normal-x))
+        (normal-y (bindat-get-field struct :normal-y))
+        (normal-z (bindat-get-field struct :normal-z))
+        (distance (bindat-get-field struct :distance)))
+    (plane-create
+     :normal-x normal-x
+     :normal-y normal-y
+     :normal-z normal-z
+     :distance distance)))
+
+(defsubst to-aabb (struct)
+  (let ((x-coordinate (bindat-get-field struct :x-coordinate))
+        (y-coordinate (bindat-get-field struct :y-coordinate))
+        (z-coordinate (bindat-get-field struct :z-coordinate))
+        (x-size (bindat-get-field struct :x-size))
+        (y-size (bindat-get-field struct :y-size))
+        (z-size (bindat-get-field struct :z-size)))
+    (aabb-create
+     :x-coordinate x-coordinate
+     :y-coordinate y-coordinate
+     :z-coordinate z-coordinate
+     :x-size x-size
+     :y-size y-size
+     :z-size z-size)))
 
 (defsubst to-color (struct)
   (let ((red (bindat-get-field struct :red))
@@ -283,13 +317,22 @@
         (y (bindat-get-field struct-data :y)))
     (vector2-create :x x :y y)))
 
+(defsubst to-vector3 (struct-data)
+  (let ((x (bindat-get-field struct-data :x))
+        (y (bindat-get-field struct-data :y))
+        (z (bindat-get-field struct-data :z)))
+    (vector3-create :x x :y y :z z)))
+
 (defsubst to-null (struct-data)
   (prim-null-create))
 
 (defsubst to-boolean (struct-data)
   (prim-bool-create :value (if (eq 1 (get-boolean struct-data))
-                             t
-                           nil)))
+                               t
+                             nil)))
+
+(defsubst shared-to-boolean (shared)
+  (prim-bool-create :value (if (eq 0 shared) nil t)))
 
 (defsubst to-integer (struct-data)
   (prim-integer-create :value (get-integer struct-data)))
@@ -304,12 +347,26 @@
   (object-id-create :value (bindat-get-field struct-data :long)))
 
 (defsubst to-dictionary (struct-data)
-  (let* ((items (bindat-get-field struct-data :items)))
-    (dictionary-create :elements (to-dic items))))
+  (let* ((shared (bindat-get-field struct-data :shared))
+         (items (bindat-get-field struct-data :items)))
+    (dictionary-create :shared (shared-to-boolean shared) :elements (to-dic items))))
 
 (defun to-dic (xs)
   (cl-loop for (key value) on xs by 'cddr
            collect (from-key-value key value)))
+
+(defsubst to-array (struct-data)
+  (let* ((shared (bindat-get-field struct-data :shared))
+         (items (bindat-get-field struct-data :items)))
+    (prim-array-create :shared (shared-to-boolean shared) :elements (mapcar 'from-variant items))))
+
+(defsubst to-pool-int-array (struct-data)
+  (let* ((items (bindat-get-field struct-data :items)))
+    (pool-int-array-create :elements (mapcar 'to-integer items))))
+
+(defsubst to-pool-string-array (struct-data)
+  (let* ((items (bindat-get-field struct-data :items)))
+    (pool-string-array-create :elements (mapcar 'to-string items))))
 
 (defsubst to-pool-vector2-array (struct-data)
   (let* ((items (bindat-get-field struct-data :items)))
@@ -317,37 +374,56 @@
 
 (defun from-key-value (key value)
   (let* ((var-name (bindat-get-field key :string-data))
-         (var-type (bindat-get-field value :data-type))
-         (var-val (pcase var-type
+         (type (bindat-get-field value :type))
+         (object-as-id (bindat-get-field value :object-as-id))
+         (var-val (pcase type
                     (0 (to-null value))
                     (1 (to-boolean value))
                     (2 (to-integer value))
                     (3 (to-float value))
                     (4 (to-string value))
                     (5 (to-vector2 value))
+                    (7 (to-vector3 value))
+                    (9 (to-plane value))
+                    (11 (to-aabb value))
                     (14 (to-color value))
                     (15 (to-node-path value))
                     (16 (to-rid value))
-                    ((pred (= (+ 17 (lsh 1 16)))) (to-object-id value))
+                    (17 (if (eq 0 object-as-id) (error "TODO object as not ID")
+                          (to-object-id value)))
                     (18 (to-dictionary value))
-                    (24 (to-pool-vector2-array value)))))
+                    (19 (to-array value))
+                    (21 (to-pool-int-array value))
+                    (23 (to-pool-string-array value))
+                    (24 (to-pool-vector2-array value))
+                    (_ (error "[from-key-value] Unknown type %s" type)))))
     `(,var-name . ,var-val)))
 
 (defun from-variant (struct)
-  (let ((var-type (bindat-get-field struct :data-type)))
-    (pcase var-type
+  (let ((var-type (bindat-get-field struct :type-data))
+        (type (bindat-get-field struct :type))
+        (object-as-id (bindat-get-field struct :object-as-id)))
+    (pcase type
       (0 (to-null struct))
       (1 (to-boolean struct))
       (2 (to-integer struct))
       (3 (to-float struct))
       (4 (to-string struct))
       (5 (to-vector2 struct))
+      (7 (to-vector3 struct))
+      (9 (to-plane struct))
+      (11 (to-aabb struct))
       (14 (to-color struct))
       (15 (to-node-path struct))
       (16 (to-rid struct))
-      ((pred (= (+ 17 (lsh 1 16)))) (to-object-id struct))
+      (17 (if (eq 0 object-as-id) (error "TODO object as not ID")
+            (to-object-id struct)))
       (18 (to-dictionary struct))
-      (24 (to-pool-vector2-array struct)))))
+      (19 (to-array struct))
+      (21 (to-pool-int-array struct))
+      (23 (to-pool-string-array struct))
+      (24 (to-pool-vector2-array struct))
+      (_ (error "[from-variant] Unknown type %s" type)))))
 
 (defun to-stack-dump (stack-data)
   (pcase stack-data
@@ -387,7 +463,7 @@
     (dotimes (i count)
       (let* ((var-name (bindat-get-field (iter-next iter) :string-data))
              (var-value (iter-next iter))
-             (var-type (bindat-get-field var-value :data-type))
+             (var-type (bindat-get-field var-value :type-data))
              (var-val (pcase var-type
                         (0 (to-null var-value))
                         (1 (to-boolean var-value))
@@ -398,7 +474,8 @@
                         (16 (to-rid var-value))
                         ((pred (= (+ 17 (lsh 1 16)))) (to-object-id var-value))
                         (18 (to-dictionary var-value))
-                        (24 (to-pool-vector2-array var-value)))))
+                        (24 (to-pool-vector2-array var-value))
+                        (_ (error "[read-var-names] var-type: %s" var-type)))))
         ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
         ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
 
@@ -418,21 +495,23 @@
 (defun to-property-info (properties)
   (let ((property-info))
     (dolist (property properties)
-      (when (eq 6 (bindat-get-field property :array-length))
-        (let* ((data (bindat-get-field property :items))
-               (name (bindat-get-field (car data) :string-data))
-               (type (bindat-get-field (nth 1 data) :integer-data))
-               (hint (bindat-get-field (nth 2 data) :integer-data))
-               (hint-string (bindat-get-field (nth 3 data) :string-data))
-               (usage (bindat-get-field (nth 4 data) :integer-data))
-               (variant (from-variant (nth 5 data))))
-          (push (property-info-create
-                 :name name
-                 :type type
-                 :hint hint
-                 :hint-string hint-string
-                 :usage usage
-                 :variant variant) property-info))))
+      (cond ((eq 6 (bindat-get-field property :array-length))
+             (let* ((data (bindat-get-field property :items))
+                    (name (bindat-get-field (car data) :string-data))
+                    (type (bindat-get-field (nth 1 data) :integer-data))
+                    (hint (bindat-get-field (nth 2 data) :integer-data))
+                    (hint-string (bindat-get-field (nth 3 data) :string-data))
+                    (usage (bindat-get-field (nth 4 data) :integer-data))
+                    (variant (from-variant (nth 5 data)))
+                    (new-prop (property-info-create
+                               :name name
+                               :type type
+                               :hint hint
+                               :hint-string hint-string
+                               :usage usage
+                               :variant variant)))
+               (push new-prop property-info)))
+            (t (message "Ignoring property %s" property))))
     property-info))
 
 (defun mk-inspect-object (iter)
@@ -513,8 +592,10 @@
             ("stack_dump" (let ((cmd (mk-stack-dump iter)))
                             ;;(message "Stack dump %s" cmd)
                             (gdscript-debugger--on-stack-dump cmd)))
-            ("message:inspect_object" (let ((cmd (mk-inspect-object iter)))
-                                        (message "message:inspect_object: %s" cmd)))
+            ("message:inspect_object"
+             (message "Received 'message:inspect_object' command")
+             (let ((cmd (mk-inspect-object iter)))
+               (message "message:inspect_object: %s" cmd)))
             ("stack_frame_vars" (let ((cmd (mk-stack-frame-vars iter)))
                                   (with-current-buffer (gdscript-debugger--get-locals-buffer)
                                     (let ((inhibit-read-only t))
@@ -574,7 +655,7 @@
 (defun gdscript-debugger-inspect-object()
   (interactive)
   (gdscript-debugger--send-command
-    (gdscript-debugger--inspect-object (object-id-create :value 1538))))
+    (gdscript-debugger--inspect-object (object-id-create :value 1278))))
 
 (defun gdscript-debugger-get-stack-dump()
   (interactive)
@@ -833,17 +914,6 @@ BUFFER nil or omitted means use the current buffer."
   (gdscript-debugger--send-command
     (gdscript-debugger--get-stack-frame-vars 0)))
 
-(provide 'gdscript-debugger)
-
-
-;; (set-marker gud-overlay-arrow-position (point) (current-buffer))
-
-;;(object-id-create :value "abc")
-
-;;(vector2-create :x 12 :y 34)
-
-;; (rid-create)
-
 (cl-defstruct (prim-null (:constructor prim-null-create)
                          (:copier nil)))
 
@@ -867,6 +937,16 @@ BUFFER nil or omitted means use the current buffer."
                            (:conc-name string->))
   value)
 
+(cl-defstruct (plane (:constructor plane-create)
+                     (:copier nil)
+                     (:conc-name plane->))
+  normal-x normal-y normal-z distance)
+
+(cl-defstruct (aabb (:constructor aabb-create)
+                    (:copier nil)
+                    (:conc-name aabb->))
+  x-coordinate y-coordinate z-coordinate x-size y-size z-size)
+
 (cl-defstruct (color (:constructor color-create)
                          (:copier nil)
                          (:conc-name color->))
@@ -885,16 +965,35 @@ BUFFER nil or omitted means use the current buffer."
                          (:conc-name object-id->))
   value)
 
-
 (cl-defstruct (dictionary (:constructor dictionary-create)
                           (:copier nil)
                           (:conc-name dictionary->))
-  elements)
+  shared elements)
 
 (cl-defstruct (vector2 (:constructor vector2-create)
                        (:copier nil)
                        (:conc-name vector2->))
   x y)
+
+(cl-defstruct (vector3 (:constructor vector3-create)
+                       (:copier nil)
+                       (:conc-name vector3->))
+  x y z)
+
+(cl-defstruct (prim-array (:constructor prim-array-create)
+                          (:copier nil)
+                          (:conc-name prim-array->))
+  shared elements)
+
+(cl-defstruct (pool-int-array (:constructor pool-int-array-create)
+                              (:copier nil)
+                              (:conc-name pool-int-array->))
+  elements)
+
+(cl-defstruct (pool-string-array (:constructor pool-string-array-create)
+                                 (:copier nil)
+                                 (:conc-name pool-string-array->))
+  elements)
 
 (cl-defstruct (pool-vector2-array (:constructor pool-vector2-array-create)
                                   (:copier nil)
@@ -967,5 +1066,6 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
   "Major mode for stack dump."
   (setq header-line-format "Stack dump"))
 
+(provide 'gdscript-debugger)
 
 
