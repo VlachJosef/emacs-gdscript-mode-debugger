@@ -74,6 +74,15 @@
         (- result)
       result)))
 
+(defsubst to-symbol (symbol-name &optional suffix)
+  (intern (concat (symbol-name symbol-name) suffix)))
+
+(defmacro capture-float-spec (symbol-name)
+  (let ((symbol (to-symbol symbol-name)))
+    `(quote ((:vect vec 4 byte)
+             (,symbol eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
+                             (apply 'bitpack--load-f32 alist)))))))
+
 (defvar gdscript-debugger--float-spec
   '((:vect vec 4 byte)
     (:float-value eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
@@ -129,15 +138,6 @@
     (:items repeat (:array-length) (struct gdscript-debugger--vector2-spec))))
 
 ;;(print (macroexpand '(capture-float-spec :hi)))
-
-(defsubst to-symbol (symbol-name &optional suffix)
-  (intern (concat (symbol-name symbol-name) suffix)))
-
-(defmacro capture-float-spec (symbol-name)
-  (let ((symbol (to-symbol symbol-name)))
-    `(quote ((:vect vec 4 byte)
-             (,symbol eval (let ((alist (reverse (append (bindat-get-field struct :vect) nil))))
-                             (apply 'bitpack--load-f32 alist)))))))
 
 (defvar gdscript-debugger--plane-spec
   `(,@(capture-float-spec :normal-x)
@@ -374,34 +374,11 @@
 
 (defun from-key-value (key value)
   (let* ((var-name (bindat-get-field key :string-data))
-         (type (bindat-get-field value :type))
-         (object-as-id (bindat-get-field value :object-as-id))
-         (var-val (pcase type
-                    (0 (to-null value))
-                    (1 (to-boolean value))
-                    (2 (to-integer value))
-                    (3 (to-float value))
-                    (4 (to-string value))
-                    (5 (to-vector2 value))
-                    (7 (to-vector3 value))
-                    (9 (to-plane value))
-                    (11 (to-aabb value))
-                    (14 (to-color value))
-                    (15 (to-node-path value))
-                    (16 (to-rid value))
-                    (17 (if (eq 0 object-as-id) (error "TODO object as not ID")
-                          (to-object-id value)))
-                    (18 (to-dictionary value))
-                    (19 (to-array value))
-                    (21 (to-pool-int-array value))
-                    (23 (to-pool-string-array value))
-                    (24 (to-pool-vector2-array value))
-                    (_ (error "[from-key-value] Unknown type %s" type)))))
+         (var-val (from-variant value)))
     `(,var-name . ,var-val)))
 
 (defun from-variant (struct)
-  (let ((var-type (bindat-get-field struct :type-data))
-        (type (bindat-get-field struct :type))
+  (let ((type (bindat-get-field struct :type))
         (object-as-id (bindat-get-field struct :object-as-id)))
     (pcase type
       (0 (to-null struct))
@@ -463,19 +440,7 @@
     (dotimes (i count)
       (let* ((var-name (bindat-get-field (iter-next iter) :string-data))
              (var-value (iter-next iter))
-             (var-type (bindat-get-field var-value :type-data))
-             (var-val (pcase var-type
-                        (0 (to-null var-value))
-                        (1 (to-boolean var-value))
-                        (2 (to-integer var-value))
-                        (3 (to-float var-value))
-                        (4 (to-string var-value))
-                        (5 (to-vector2 var-value))
-                        (16 (to-rid var-value))
-                        ((pred (= (+ 17 (lsh 1 16)))) (to-object-id var-value))
-                        (18 (to-dictionary var-value))
-                        (24 (to-pool-vector2-array var-value))
-                        (_ (error "[read-var-names] var-type: %s" var-type)))))
+             (var-val (from-variant var-value)))
         ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
         ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
 
@@ -539,7 +504,7 @@
   (let ((skip-this (iter-next iter))
         (can-continue (bindat-get-field (iter-next iter) :boolean-data))
         (reason (bindat-get-field (iter-next iter) :string-data)))
-    `(command "debug_enter" can-continue ,can-continue reason, reason)))
+    (debug-enter-create :can-continue can-continue :reason reason)))
 
 (defun mk-debug-exit (iter)
   (let ((skip-this (iter-next iter)))
@@ -555,16 +520,17 @@
 (defsubst gdscript-debugger--drop-res (file-path)
   (substring file-path (length "res://")))
 
-(defun gdscript-debugger--on-stack-dump (stuck-dump)
+(defun gdscript-debugger--on-stack-dump (stuck-dump project-root)
   (let* ((file (stack-dump->file stuck-dump))
          (line (stack-dump->line stuck-dump))
-         (project-root (gdscript-util--find-project-configuration-file))
          (full-file-path (concat project-root (gdscript-debugger--drop-res file))))
-    (with-current-buffer (find-file full-file-path)
-      (let* ((posns (line-posns line))
-             (start-posn (car posns)))
-        (set-marker gdscript-debugger--thread-position start-posn (current-buffer))
-        (goto-char gdscript-debugger--thread-position)))))
+    (if (not project-root)
+        (error "Project for file %s not found." file)
+      (with-current-buffer (find-file full-file-path)
+        (let* ((posns (line-posns line))
+               (start-posn (car posns)))
+          (set-marker gdscript-debugger--thread-position start-posn (current-buffer))
+          (goto-char gdscript-debugger--thread-position))))))
 
 (defun gdscript-debugger--handle-server-reply (process content)
   "Gets invoked whenever the server sends data to the client."
@@ -575,8 +541,12 @@
       (let ((iter (command-iter content)))
         (while t
           (pcase (bindat-get-field (iter-next iter) :string-data)
-            ("debug_enter" (let ((cmd (mk-debug-enter iter)))
-                             (message "Debug_enter: %s" cmd)))
+            ("debug_enter"
+             (message "Received 'debug_enter' command")
+             (let ((cmd (mk-debug-enter iter)))
+               (pcase (debug-enter->reason cmd)
+                 ("Breakpoint" (gdscript-debugger-get-stack-dump))
+                 (_ (message "Unknown reason %s" cmd)))))
             ("debug_exit" (let ((cmd (mk-debug-exit iter)))
                             (message "Debug_exit: %s " cmd)))
             ("output" (let ((cmd (mk-output iter)))
@@ -589,9 +559,10 @@
             ("performance" (let ((cmd (mk-performance iter)))
                              ;; (message "Performace: %s" cmd)
                              ))
-            ("stack_dump" (let ((cmd (mk-stack-dump iter)))
-                            ;;(message "Stack dump %s" cmd)
-                            (gdscript-debugger--on-stack-dump cmd)))
+            ("stack_dump"
+             (message "Received 'stack_dump' command")
+             (let ((cmd (mk-stack-dump iter)))
+               (gdscript-debugger--on-stack-dump cmd (process-get process 'project))))
             ("message:inspect_object"
              (message "Received 'message:inspect_object' command")
              (let ((cmd (mk-inspect-object iter)))
@@ -627,12 +598,13 @@
   "Gets called when the status of the network connection changes."
   (message "[sentinel] process: %s" process)
   (message "[sentinel] event  : %s" event)
-
   (cond
    ((string-match "open from .*\n" event)
     (push process server-clients))
-   ((string= event "connection broken by remote peer\n")
-    (message "Resetting server to accept data")
+   ((or
+     (string= event "connection broken by remote peer\n")
+     (string= event "deleted\n"))
+    (message "Resetting server to accept data.")
     (setq gdscript-debugger--previous-packet-data nil)
     (setq server-clients '()))
    ((eq (process-status process) 'closed)
@@ -645,9 +617,7 @@
      (`() (message "No game process is running."))
      (`(,server-process)
       (let ((command (progn ,@body)))
-        (process-send-string server-process command)
-        ;;(message "%s %s" server-process (process-status server-process))
-        ))
+        (process-send-string server-process command)))
      (_ (message "More than one game process running"))))
 
 ;;(print (macroexpand '(gdscript-debugger--send-command server-process (message "HIII %s" server-process))))
@@ -678,46 +648,23 @@
 
   ;;(set-marker gdscript-debugger--thread-position (point) (current-buffer))
 
-
-  ;; (make-network-process
-  ;;  :name "echo-server"
-  ;;  :buffer "*echo-server*"
-  ;;  :family 'ipv4
-  ;;  :service echo-server-port
-  ;;  :sentinel 'gdscript-debugger--sentinel-function
-  ;;  :filter 'gdscript-debugger--handle-server-reply
-  ;;  :server 't)
-
-  (let ((server-process
-         (make-network-process
-          :name "DEBUG"
-          :buffer "*my-server22*"
-          :server t
-          :host "127.0.0.1"
-          :service 6009
-          :coding 'binary
-          :family 'ipv4
-          :filter #'gdscript-debugger--handle-server-reply
-          :filter-multibyte nil
-          :sentinel #'gdscript-debugger--sentinel-function)))
-    (message "server-process: %s" server-process)
-    (message "(type-of server-process): %s" (type-of server-process))))
-
-
-;; (defun string-bindat-spec (len)
-;;   '((string-length str ,len)))
-
-
-;; (defun read-type (type size offset content data)
-;;   (pcase type
-;;     (4 (progn
-;;          (message "Reading String of size %s %s" size data)
-;;          ;; (let* ((str (bindat-unpack (string-bindat-spec size) content offset))
-;;          ;;        (cmd (bindat-get-field str 'string-length)))
-;;          ;;   (message "CMD: %s" cmd)
-;;          ;;   )
-;;          ))
-;;     (_ (message "UNKNOWN TYPE %s" type))))
+  (let ((project-root (gdscript-util--find-project-configuration-file)))
+    (if (not project-root)
+        (error "Not in Godot project!")
+      (let ((server-process
+             (make-network-process
+              :name "DEBUG"
+              :buffer nil
+              :server t
+              :host "127.0.0.1"
+              :service 6009
+              :coding 'binary
+              :family 'ipv4
+              :filter #'gdscript-debugger--handle-server-reply
+              :filter-multibyte nil
+              :sentinel #'gdscript-debugger--sentinel-function)))
+        (process-put server-process 'project project-root)
+        (message "Debugger server started - project: %s" project-root)))))
 
 (defun gdscript-debugger--inspect-object-definition (command-length)
   `((:packet-length u32r)
@@ -886,28 +833,60 @@ BUFFER nil or omitted means use the current buffer."
 
 ;;(make-overlay (line-beginning-position) (line-beginning-position) 'before-string)
 
+(defun gdscript-debugger--absolute-path ()
+  "Return the absolute path of current gdscript file."
+  (when (and buffer-file-name
+             (file-exists-p buffer-file-name)
+             (string= (file-name-extension buffer-file-name) "gd"))
+    buffer-file-name))
+
 (defun gdscript-debugger--current-file ()
-  (concat "res://"
-          (gdscript-util--get-godot-project-file-path-relative buffer-file-name)
-          "." (file-name-extension buffer-file-name)))
+  (let ((current-file (gdscript-util--get-godot-project-file-path-relative buffer-file-name)))
+    (when current-file
+      (let ((extension (file-name-extension buffer-file-name)))
+        (when (string= extension "gd")
+          (concat "res://" current-file ".gd"))))))
 
-(defun gdscript-debugger--remove-breakpoint ()
-  (interactive)
-  (gdscript-debugger--send-command
-    (let ((start (line-beginning-position))
-          (end (line-end-position))
-          (file (gdscript-debugger--current-file))
-          (line (line-number-at-pos)))
-      (gdscript-debugger--remove-strings start end)
-      (gdscript-debugger--breakpoint-command file line nil))))
+(defmacro gdscript-debugger--with-gdscript-file (file-info body)
+  (declare (indent 1) (debug t))
+  `(let ((,file-info (cons (gdscript-debugger--current-file) (gdscript-debugger--absolute-path))))
+     (if (not (car ,file-info))
+         (message "No GDScript file.")
+       ,body)))
 
-(defun gdscript-debugger--add-breakpoint ()
+;; (print (macroexpand '(gdscript-debugger--with-gdscript-file gdscript-file
+;;  (let ((line (line-number-at-pos)))
+;;    (message "No breakpoint at %s:%s" line gdscript-file)))))
+
+(defun gdscript-debugger-remove-breakpoint ()
   (interactive)
-  (gdscript-debugger--send-command
-    (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
-    (let ((file (gdscript-debugger--current-file))
-          (line (line-number-at-pos)))
-      (gdscript-debugger--breakpoint-command file line t))))
+  (gdscript-debugger--with-gdscript-file file-info
+    (let* ((start (line-beginning-position))
+           (end (line-end-position))
+           (line (line-number-at-pos))
+           (file (car file-info))
+           (file-absolute (cdr file-info))
+           (breakpoint (breakpoint-create :file file :file-absolute file-absolute :line line)))
+      (if (not (member breakpoint gdscript-debugger--breakpoints))
+          (message "No breakpoint at %s:%s" file line)
+        (gdscript-debugger--send-command
+          (gdscript-debugger--remove-strings start end)
+          (gdscript-debugger--remove-breakpoint-from-buffer breakpoint)
+          (gdscript-debugger--breakpoint-command file line nil))))))
+
+(defun gdscript-debugger-add-breakpoint ()
+  (interactive)
+  (gdscript-debugger--with-gdscript-file file-info
+    (let* ((line (line-number-at-pos))
+           (file (car file-info))
+           (file-absolute (cdr file-info))
+           (breakpoint (breakpoint-create :file file :file-absolute file-absolute :line line)))
+      (if (member breakpoint gdscript-debugger--breakpoints)
+          (message "Breakpoint already present at %s:%s" file line)
+        (gdscript-debugger--send-command
+          (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
+          (gdscript-debugger--add-breakpoint-to-buffer breakpoint)
+          (gdscript-debugger--breakpoint-command file line t))))))
 
 (defun gdscript-debugger-get-stack-frame-vars ()
   (interactive)
@@ -1020,16 +999,60 @@ BUFFER nil or omitted means use the current buffer."
                              (:conc-name property-info->))
   name type hint hint-string usage variant)
 
+(cl-defstruct (breakpoint (:constructor breakpoint-create)
+                          (:copier nil)
+                          (:conc-name breakpoint->))
+  file file-absolute line)
+
+(cl-defstruct (debug-enter (:constructor debug-enter-create)
+                           (:copier nil)
+                           (:conc-name debug-enter->))
+  can-continue reason)
+
 (defun gdscript-debugger--parent-mode ()
   "Generic mode to derive all other buffer modes from."
   (kill-all-local-variables)
   (setq buffer-read-only t)
   (buffer-disable-undo))
 
+(defun gdscript-debugger-toggle-breakpoint ()
+  (interactive)
+  (message "TODO [gdscript-debugger-toggle-breakpoint]"))
+
+(defun gdscript-debugger-delete-breakpoint ()
+  (interactive)
+  (message "TODO [gdscript-debugger-delete-breakpoint]"))
+
+(defun gdscript-debugger-goto-breakpoint ()
+  (interactive)
+  (save-excursion
+    (beginning-of-line)
+    (let ((breakpoint (get-text-property (point) 'gdscript-debugger--breakpoint)))
+      (if breakpoint
+          (let ((file (breakpoint->file-absolute breakpoint))
+                (line (breakpoint->line breakpoint)))
+            (save-selected-window
+              (let* ((buffer (find-file-noselect file))
+                     (window (display-buffer buffer)))
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (forward-line (1- line))
+                  (set-window-point window (point))))))
+        (error "Not recognized as break/watchpoint line")))))
+
 (defvar gdscript-debugger--stack-dump-mode-map
   (let ((map (make-sparse-keymap)))
     (suppress-keymap map)
     (define-key map "q" 'kill-current-buffer)
+    map))
+
+(defvar gdscript-debugger--breakpoints-mode-map
+  (let ((map (make-sparse-keymap)))
+    (suppress-keymap map)
+    (define-key map " " 'gdscript-debugger-toggle-breakpoint)
+    (define-key map "q" 'kill-current-buffer)
+    (define-key map "D" 'gdscript-debugger-delete-breakpoint)
+    (define-key map "\r" 'gdscript-debugger-goto-breakpoint)
     map))
 
 (defvar-local gdscript-debugger--buffer-type nil
@@ -1046,26 +1069,84 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
           (throw 'found buffer))))))
 
 (defun gdscript-debugger--get-locals-buffer ()
-  (gdscript-debugger--get-buffer-create 'stack-dump))
+  (gdscript-debugger--get-buffer-create 'stack-dump-buffer))
 
 (defun gdscript-debugger-display-stack-dump-buffer ()
   "Display the variables of current stack."
   (interactive)
-  (display-buffer (gdscript-debugger--get-buffer-create 'stack-dump)))
+  (display-buffer (gdscript-debugger--get-buffer-create 'stack-dump-buffer)))
+
+(defun gdscript-debugger-display-breakpoint-buffer ()
+  "Display the breakpoints."
+  (interactive)
+  (display-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)))
+
+(defun gdscript-debugger--remove-breakpoint-from-buffer (breakpoint)
+  (setq gdscript-debugger--breakpoints (remove breakpoint gdscript-debugger--breakpoints))
+  (refresh-breakpoints-buffer))
+
+(defun gdscript-debugger--add-breakpoint-to-buffer (breakpoint)
+  (unless (member breakpoint gdscript-debugger--breakpoints)
+    (push breakpoint gdscript-debugger--breakpoints)
+    (refresh-breakpoints-buffer)))
+
+(defun refresh-breakpoints-buffer ()
+ (with-current-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)
+   (let ((inhibit-read-only t))
+     (erase-buffer)
+     (dolist (breakpoint gdscript-debugger--breakpoints)
+       (insert (concat (propertize (format "%s:%s" (breakpoint->file breakpoint) (breakpoint->line breakpoint)) 'gdscript-debugger--breakpoint breakpoint) "\n"))))))
 
 (defun gdscript-debugger--get-buffer-create (buffer-type)
   (or (gdscript-debugger--get-buffer buffer-type)
-      (let ((new (generate-new-buffer "Stack dump")))
+      (let ((rules (assoc buffer-type gdscript-debugger--buffer-rules))
+            (new (generate-new-buffer "limbo")))
         (with-current-buffer new
-          (gdscript-debugger--stack-dump-mode)
-          (setq gdscript-debugger--buffer-type buffer-type)
-          (setq mode-name "Locals: ")
-          (current-buffer)))))
+          (let ((mode (gdscript-debugger--rules-buffer-mode rules)))
+            (when mode (funcall mode))
+            (setq gdscript-debugger--buffer-type buffer-type)
+            ;;(setq mode-name "Locals: ")
+            (rename-buffer (funcall (gdscript-debugger--rules-name-maker rules)))
+            (current-buffer))))))
 
 (define-derived-mode gdscript-debugger--stack-dump-mode gdscript-debugger--parent-mode "Stack Dump"
   "Major mode for stack dump."
   (setq header-line-format "Stack dump"))
 
-(provide 'gdscript-debugger)
+(define-derived-mode gdscript-debugger--breakpoints-mode gdscript-debugger--parent-mode "Breakpoints"
+  "Major mode for breakpoints management."
+  (setq header-line-format "Breakpoints"))
 
+(defun gdscript-debugger--stack-dump-buffer-name ()
+  (concat "* Stack dump *"))
+
+(defun gdscript-debugger--breakpoints-buffer-name ()
+  (concat "* Breakpoints *"))
+
+(defvar gdscript-debugger--buffer-rules '())
+(defvar gdscript-debugger--breakpoints '())
+
+(defun gdscript-debugger--rules-name-maker (rules-entry)
+  (cadr rules-entry))
+(defun gdscript-debugger--rules-buffer-mode (rules-entry)
+  (nth 2 rules-entry))
+
+(defun gdscript-debugger--set-buffer-rules (buffer-type &rest rules)
+  (let ((binding (assoc buffer-type gdscript-debugger--buffer-rules)))
+    (if binding
+	(setcdr binding rules)
+      (push (cons buffer-type rules)
+	    gdscript-debugger--buffer-rules))))
+
+(gdscript-debugger--set-buffer-rules
+ 'stack-dump-buffer
+ 'gdscript-debugger--stack-dump-buffer-name
+ 'gdscript-debugger--stack-dump-mode)
+
+(gdscript-debugger--set-buffer-rules
+ 'breakpoints-buffer
+ 'gdscript-debugger--breakpoints-buffer-name
+ 'gdscript-debugger--breakpoints-mode)
+
+(provide 'gdscript-debugger)
 
