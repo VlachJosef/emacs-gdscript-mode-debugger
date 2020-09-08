@@ -145,6 +145,10 @@
   '((:array-length u32r)
     (:items repeat (:array-length) (struct gdscript-debugger--vector2-spec))))
 
+(defvar gdscript-debugger--pool-color-array-spec
+  '((:array-length u32r)
+    (:items repeat (:array-length) (struct gdscript-debugger--color-spec))))
+
 ;;(print (macroexpand '(capture-float-spec :hi)))
 
 (defvar gdscript-debugger--plane-spec
@@ -231,6 +235,7 @@
            (21 (struct gdscript-debugger--pool-int-array-spec))
            (23 (struct gdscript-debugger--pool-string-array-spec))
            (24 (struct gdscript-debugger--pool-vector-2-array-spec))
+           (26 (struct gdscript-debugger--pool-color-array-spec))
            (t (eval (error "Unknown type: %s" tag))))))
 
 (defvar gdscript-debugger--previous-packet-data nil)
@@ -390,21 +395,25 @@
            collect (from-key-value key value)))
 
 (defsubst to-array (struct-data)
-  (let* ((shared (bindat-get-field struct-data :shared))
-         (items (bindat-get-field struct-data :items)))
+  (let ((shared (bindat-get-field struct-data :shared))
+        (items (bindat-get-field struct-data :items)))
     (prim-array-create :shared (shared-to-boolean shared) :elements (mapcar 'from-variant items))))
 
 (defsubst to-pool-int-array (struct-data)
-  (let* ((items (bindat-get-field struct-data :items)))
+  (let ((items (bindat-get-field struct-data :items)))
     (pool-int-array-create :elements (mapcar 'to-integer items))))
 
 (defsubst to-pool-string-array (struct-data)
-  (let* ((items (bindat-get-field struct-data :items)))
+  (let ((items (bindat-get-field struct-data :items)))
     (pool-string-array-create :elements (mapcar 'to-string items))))
 
 (defsubst to-pool-vector2-array (struct-data)
-  (let* ((items (bindat-get-field struct-data :items)))
+  (let ((items (bindat-get-field struct-data :items)))
     (pool-vector2-array-create :elements (mapcar 'to-vector2 items))))
+
+(defsubst to-pool-color-array (struct-data)
+  (let ((items (bindat-get-field struct-data :items)))
+    (pool-color-array-create :elements (mapcar 'to-color items))))
 
 (defun from-key-value (key value)
   (let* ((var-name (bindat-get-field key :string-data))
@@ -436,12 +445,17 @@
       (21 (to-pool-int-array struct))
       (23 (to-pool-string-array struct))
       (24 (to-pool-vector2-array struct))
+      (26 (to-pool-color-array struct))
       (_ (error "[from-variant] Unknown type %s" type)))))
 
-(defun to-stack-dump (stack-data)
+(defun to-stack-dump (stack-data level)
   (pcase stack-data
     (`(,file-key, file-value, line-key, line-value, function-key, function-value, id-key, id-value)
-     (stack-dump-create :file (get-string file-value) :line (get-integer line-value) :function-name (get-string function-value)))))
+     (stack-dump-create
+      :file (get-string file-value)
+      :line (get-integer line-value)
+      :function-name (get-string function-value)
+      :level level))))
 
 (defun error-data-to-plist (error-data)
   (pcase error-data
@@ -523,8 +537,11 @@
 
 (defun mk-stack-dump (iter)
   (let ((stack-level-count (get-integer (iter-next iter)))
-        (stack-data (bindat-get-field (iter-next iter) :items)))
-    (to-stack-dump stack-data)))
+        (outputs))
+    (dotimes (level stack-level-count)
+      (let ((stack-data (bindat-get-field (iter-next iter) :items)))
+        (push (to-stack-dump stack-data level) outputs)))
+    (reverse outputs)))
 
 (defun mk-output (iter)
   (let ((output-count (bindat-get-field (iter-next iter) :integer-data))
@@ -624,9 +641,10 @@
                  (gdscript-debugger--command-handler
                   (message "Received 'stack_dump' command")
                   (let ((cmd (mk-stack-dump iter)))
-                    (message "[stack_dump] cmd: %s" cmd)
-                    (gdscript-debugger--on-stack-dump cmd (process-get process 'project))
-                    (gdscript-debugger-get-stack-frame-vars))))
+                    ;;(message "[stack_dump] cmd: %s" cmd)
+                    (gdscript-debugger--refresh-stack-frame-vars-buffer cmd)
+                    (gdscript-debugger--on-stack-dump (car cmd) (process-get process 'project))
+                    (gdscript-debugger-get-stack-frame-vars (stack-dump->level (car cmd))))))
                 ("stack_frame_vars"
                  (gdscript-debugger--command-handler
                   (message "Received 'stack_frame_vars' command")
@@ -707,6 +725,10 @@
   (interactive)
   (gdscript-debugger--send-command (gdscript-debugger--command "next")))
 
+(defun gdscript-debugger-step()
+  (interactive)
+  (gdscript-debugger--send-command (gdscript-debugger--command "step")))
+
 ;;;###autoload
 (defun gdscript-debugger-make-server()
   (interactive)
@@ -725,7 +747,7 @@
               :buffer nil
               :server t
               :host "127.0.0.1"
-              :service 6009
+              :service 6010
               :coding 'binary
               :family 'ipv4
               :filter #'gdscript-debugger--handle-server-reply
@@ -956,10 +978,9 @@ BUFFER nil or omitted means use the current buffer."
           (gdscript-debugger--add-breakpoint-to-buffer breakpoint)
           (gdscript-debugger--breakpoint-command file line t))))))
 
-(defun gdscript-debugger-get-stack-frame-vars ()
-  (interactive)
+(defun gdscript-debugger-get-stack-frame-vars (level)
   (gdscript-debugger--send-command
-    (gdscript-debugger--get-stack-frame-vars 0)))
+    (gdscript-debugger--get-stack-frame-vars level)))
 
 (cl-defstruct (prim-null (:constructor prim-null-create)
                          (:copier nil)))
@@ -1057,6 +1078,11 @@ BUFFER nil or omitted means use the current buffer."
                                   (:conc-name pool-vector2-array->))
   elements)
 
+(cl-defstruct (pool-color-array (:constructor pool-color-array-create)
+                                (:copier nil)
+                                (:conc-name pool-color-array->))
+  elements)
+
 (cl-defstruct (stack-frame-vars (:constructor stack-frame-vars-create)
                                 (:copier nil)
                                 (:conc-name stack-frame-vars->))
@@ -1065,7 +1091,7 @@ BUFFER nil or omitted means use the current buffer."
 (cl-defstruct (stack-dump (:constructor stack-dump-create)
                           (:copier nil)
                           (:conc-name stack-dump->))
-  file line function-name)
+  file line function-name level)
 
 (cl-defstruct (inspect-object (:constructor inspect-object-create)
                               (:copier nil)
@@ -1118,10 +1144,20 @@ BUFFER nil or omitted means use the current buffer."
                   (set-window-point window (point))))))
         (error "Not recognized as break/watchpoint line")))))
 
+(defun gdscript-debugger-show-stack-frame-vars ()
+  (interactive)
+  (save-excursion
+    (beginning-of-line)
+    (let ((stack (get-text-property (point) 'gdscript-debugger--stack-dump)))
+      (if stack
+          (gdscript-debugger-get-stack-frame-vars (stack-dump->level stack))
+        (error "Not recognized as stack-frame line")))))
+
 (defvar gdscript-debugger--stack-dump-mode-map
   (let ((map (make-sparse-keymap)))
     (suppress-keymap map)
     (define-key map "q" 'kill-current-buffer)
+    (define-key map "\r" 'gdscript-debugger-show-stack-frame-vars)
     map))
 
 (defvar gdscript-debugger--breakpoints-mode-map
@@ -1131,6 +1167,12 @@ BUFFER nil or omitted means use the current buffer."
     (define-key map "q" 'kill-current-buffer)
     (define-key map "D" 'gdscript-debugger-delete-breakpoint)
     (define-key map "\r" 'gdscript-debugger-goto-breakpoint)
+    map))
+
+(defvar gdscript-debugger--stack-frame-vars-mode-map
+  (let ((map (make-sparse-keymap)))
+    (suppress-keymap map)
+    (define-key map "q" 'kill-current-buffer)
     map))
 
 (defvar-local gdscript-debugger--buffer-type nil
@@ -1147,12 +1189,17 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
           (throw 'found buffer))))))
 
 (defun gdscript-debugger--get-locals-buffer ()
-  (gdscript-debugger--get-buffer-create 'stack-dump-buffer))
+  (gdscript-debugger--get-buffer-create 'stack-frame-vars-buffer))
 
 (defun gdscript-debugger-display-stack-dump-buffer ()
-  "Display the variables of current stack."
+  "Display stack dump."
   (interactive)
   (display-buffer (gdscript-debugger--get-buffer-create 'stack-dump-buffer)))
+
+(defun gdscript-debugger-display-stack-frame-vars-buffer ()
+  "Display the variables of current stack."
+  (interactive)
+  (display-buffer (gdscript-debugger--get-buffer-create 'stack-frame-vars-buffer)))
 
 (defun gdscript-debugger-display-breakpoint-buffer ()
   "Display the breakpoints."
@@ -1167,6 +1214,26 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
   (unless (member breakpoint gdscript-debugger--breakpoints)
     (push breakpoint gdscript-debugger--breakpoints)
     (refresh-breakpoints-buffer)))
+
+(defun gdscript-debugger--refresh-stack-frame-vars-buffer (stack-dump)
+  (with-current-buffer (gdscript-debugger--get-buffer-create 'stack-dump-buffer)
+    (let ((inhibit-read-only t)
+          (longest-file-name 0))
+      (dolist (stack stack-dump)
+        (let* ((file (stack-dump->file stack))
+               (line (stack-dump->line stack))
+               (len (+ (length file) (length (number-to-string line)))))
+          (when (< longest-file-name len)
+            (setq longest-file-name len))))
+      (erase-buffer)
+      (dolist (stack stack-dump)
+        (let ((ident (format "%s:%s" (stack-dump->file stack) (stack-dump->line stack))))
+          (insert (propertize
+                   (concat
+                    (format (concat "%s - %-" (number-to-string (1+ longest-file-name)) "s - ") (stack-dump->level stack) ident)
+                    (propertize
+                     (format "%s\n" (stack-dump->function-name stack)) 'font-lock-face font-lock-function-name-face))
+                   'gdscript-debugger--stack-dump stack)))))))
 
 (defun refresh-breakpoints-buffer ()
  (with-current-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)
@@ -1190,12 +1257,19 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
   "Major mode for stack dump."
   (setq header-line-format "Stack dump"))
 
+(define-derived-mode gdscript-debugger--stack-frame-vars-mode gdscript-debugger--parent-mode "Stack Frame Vars"
+  "Major mode for stack frame variables."
+  (setq header-line-format "Stack frame vars"))
+
 (define-derived-mode gdscript-debugger--breakpoints-mode gdscript-debugger--parent-mode "Breakpoints"
   "Major mode for breakpoints management."
   (setq header-line-format "Breakpoints"))
 
 (defun gdscript-debugger--stack-dump-buffer-name ()
   (concat "* Stack dump *"))
+
+(defun gdscript-debugger--stack-frame-vars-buffer-name ()
+  (concat "* Stack frame vars *"))
 
 (defun gdscript-debugger--breakpoints-buffer-name ()
   (concat "* Breakpoints *"))
@@ -1216,6 +1290,11 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
 	    gdscript-debugger--buffer-rules))))
 
 (gdscript-debugger--set-buffer-rules
+ 'stack-frame-vars-buffer
+ 'gdscript-debugger--stack-frame-vars-buffer-name
+ 'gdscript-debugger--stack-frame-vars-mode)
+
+(gdscript-debugger--set-buffer-rules
  'stack-dump-buffer
  'gdscript-debugger--stack-dump-buffer-name
  'gdscript-debugger--stack-dump-mode)
@@ -1224,5 +1303,15 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
  'breakpoints-buffer
  'gdscript-debugger--breakpoints-buffer-name
  'gdscript-debugger--breakpoints-mode)
+
+(define-key gdscript-mode-map (kbd "C-c C-d C-d s") 'gdscript-debugger-display-stack-frame-vars-buffer)
+(define-key gdscript-mode-map (kbd "C-c C-d C-d d") 'gdscript-debugger-display-stack-dump-buffer)
+(define-key gdscript-mode-map (kbd "C-c C-d C-d b") 'gdscript-debugger-display-breakpoint-buffer)
+(define-key gdscript-mode-map (kbd "C-c C-d b") 'gdscript-debugger-add-breakpoint)
+(define-key gdscript-mode-map (kbd "C-c C-d r") 'gdscript-debugger-remove-breakpoint)
+(define-key gdscript-mode-map (kbd "C-c C-d q") 'gdscript-debugger-make-server)
+(define-key gdscript-mode-map (kbd "C-c C-d n") 'gdscript-debugger-next)
+(define-key gdscript-mode-map (kbd "C-c C-d c") 'gdscript-debugger-continue)
+(define-key gdscript-mode-map (kbd "C-c C-d s") 'gdscript-debugger-step)
 
 (provide 'gdscript-debugger)
