@@ -112,6 +112,14 @@
     ,@(capture-float-spec :y)
     ,@(capture-float-spec :z)))
 
+(defvar gdscript-debugger--transform2d-spec
+  `(,@(capture-float-spec :xx)
+    ,@(capture-float-spec :yx)
+    ,@(capture-float-spec :xy)
+    ,@(capture-float-spec :yy)
+    ,@(capture-float-spec :x-origin)
+    ,@(capture-float-spec :y-origin)))
+
 (defvar gdscript-debugger--dictionary-spec
   '((:data u32r)
     (:shared   eval (logand (bindat-get-field struct :data) #x80000000))
@@ -152,6 +160,17 @@
     ,@(capture-float-spec :x-size)
     ,@(capture-float-spec :y-size)
     ,@(capture-float-spec :z-size)))
+
+(defvar gdscript-debugger--basis-spec
+  `(,@(capture-float-spec :xx)
+    ,@(capture-float-spec :yx)
+    ,@(capture-float-spec :zx)
+    ,@(capture-float-spec :xy)
+    ,@(capture-float-spec :yy)
+    ,@(capture-float-spec :zy)
+    ,@(capture-float-spec :xz)
+    ,@(capture-float-spec :yz)
+    ,@(capture-float-spec :zz)))
 
 (defvar gdscript-debugger--color-spec
   `(,@(capture-float-spec :red)
@@ -198,8 +217,10 @@
            (4 (struct gdscript-debugger--string-spec))
            (5 (struct gdscript-debugger--vector2-spec))
            (7 (struct gdscript-debugger--vector3-spec))
+           (8 (struct gdscript-debugger--transform2d-spec))
            (9 (struct gdscript-debugger--plane-spec))
            (11 (struct gdscript-debugger--aabb-spec))
+           (12 (struct gdscript-debugger--basis-spec))
            (14 (struct gdscript-debugger--color-spec))
            (15 (struct gdscript-debugger--node-path-spec))
            (16 (struct gdscript-debugger--rid-spec))
@@ -213,6 +234,8 @@
            (t (eval (error "Unknown type: %s" tag))))))
 
 (defvar gdscript-debugger--previous-packet-data nil)
+(defvar gdscript-debugger--data-needed nil)
+(defvar gdscript-debugger--offset 0)
 
 (defvar gdscript-debugger--packet-length-bindat-spec
   '((:packet-length u32r)))
@@ -223,37 +246,21 @@
 (defun gdscript-debugger--process-packet (content offset)
   (bindat-unpack godot-data-bindat-spec content offset))
 
-(iter-defun command-iter (content)
-  (let* ((content (concat gdscript-debugger--previous-packet-data content))
-         (content-length (length content))
-         (offset 0))
-    (message "(content received): %s" (length content))
-    (while (< offset content-length)
-      (let* ((packet-length-data (gdscript-debugger--current-packet content offset))
-             (packet-length (bindat-get-field packet-length-data :packet-length))
-             (next-packet-offset (+ 4 offset packet-length)))
-        ;;(message "packet-length-data: %s" packet-length-data)
-        ;;(message "offset %s packet-length     : %s" offset packet-length)
-        (if (< next-packet-offset content-length)
-            (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-              ;;(message "packet-data %s - %s       : %s" (+ 4 offset)  next-packet-offset packet-data)
-              (iter-yield packet-data)
-              (setq offset next-packet-offset))
-          (progn
-            (setq gdscript-debugger--previous-packet-data (substring content offset content-length))
-
-            ;;(message "UPS, we need more data!!!!!!!!!!!!!!!!!!!!!!!!!!! %s %s" next-packet-offset content-length)
-            (cond
-             ((eq next-packet-offset content-length)
-              ;;(message "But since %s %s are equals we need to process last packet" next-packet-offset content-length)
-              ;;(message "Last packet %s - %s" (+ 4 offset) next-packet-offset)
-              (let ((packet-data (gdscript-debugger--process-packet content (+ 4 offset))))
-                (iter-yield packet-data)
-                (setq gdscript-debugger--previous-packet-data nil)
-                ;;(message "LAST packet-data %s - %s     : %s" (+ 4 offset)  next-packet-offset packet-data)
-                )))
-            (setq offset next-packet-offset) ;; to break out of loop
-            ))))))
+(iter-defun command-iter ()
+  (setq gdscript-debugger--data-needed
+        (catch 'not-enough-data-to-process-packed
+          (while (< gdscript-debugger--offset (length gdscript-debugger--previous-packet-data))
+            (let* ((content gdscript-debugger--previous-packet-data)
+                   (content-length (length content))
+                   (packet-length-data (gdscript-debugger--current-packet content gdscript-debugger--offset))
+                   (packet-length (bindat-get-field packet-length-data :packet-length))
+                   (next-packet-offset (+ 4 gdscript-debugger--offset packet-length)))
+              (if (<= next-packet-offset content-length)
+                  (let ((packet-data (gdscript-debugger--process-packet content (+ 4 gdscript-debugger--offset))))
+                    (setq gdscript-debugger--offset next-packet-offset)
+                    (iter-yield packet-data))
+                (throw 'not-enough-data-to-process-packed next-packet-offset))))))
+  (setq gdscript-debugger--offset 0))
 
 (defsubst get-boolean (struct-data)
   (bindat-get-field struct-data :boolean-data))
@@ -296,6 +303,21 @@
      :y-size y-size
      :z-size z-size)))
 
+(defsubst to-basis (struct)
+  (let ((xx (bindat-get-field struct :xx))
+        (yx (bindat-get-field struct :yx))
+        (zx (bindat-get-field struct :zx))
+        (xy (bindat-get-field struct :xy))
+        (yy (bindat-get-field struct :yy))
+        (zy (bindat-get-field struct :zy))
+        (xz (bindat-get-field struct :xz))
+        (yz (bindat-get-field struct :yz))
+        (zz (bindat-get-field struct :zz)))
+    (basis-create
+     :x (vector3-create :x xx :y yx :z zx)
+     :y (vector3-create :x xy :y yy :z zy)
+     :z (vector3-create :x xz :y yz :z zz))))
+
 (defsubst to-color (struct)
   (let ((red (bindat-get-field struct :red))
         (green (bindat-get-field struct :green))
@@ -322,6 +344,18 @@
         (y (bindat-get-field struct-data :y))
         (z (bindat-get-field struct-data :z)))
     (vector3-create :x x :y y :z z)))
+
+(defsubst to-transform2d (struct-data)
+  (let ((xx (bindat-get-field struct-data :xx))
+        (yx (bindat-get-field struct-data :yx))
+        (xy (bindat-get-field struct-data :xy))
+        (yy (bindat-get-field struct-data :yy))
+        (x-origin (bindat-get-field struct-data :x-origin))
+        (y-origin (bindat-get-field struct-data :y-origin)))
+    (transform2d-create
+     :x (vector2-create :x xx :y yx)
+     :y (vector2-create :x xy :y yy)
+     :origin (vector2-create :x :x-origin :y :y-origin))))
 
 (defsubst to-null (struct-data)
   (prim-null-create))
@@ -388,8 +422,10 @@
       (4 (to-string struct))
       (5 (to-vector2 struct))
       (7 (to-vector3 struct))
+      (8 (to-transform2d struct))
       (9 (to-plane struct))
       (11 (to-aabb struct))
+      (12 (to-basis struct))
       (14 (to-color struct))
       (15 (to-node-path struct))
       (16 (to-rid struct))
@@ -441,8 +477,7 @@
       (let* ((var-name (bindat-get-field (iter-next iter) :string-data))
              (var-value (iter-next iter))
              (var-val (from-variant var-value)))
-        ;;(message "[read-var-names] VAR-VALUE: %s" var-value)
-        ;;(message "[read-var-names] VAR-VALUE: type %s %s" var-type var-val)
+        ;;(message "%s) [read-var-names] var-name var-val : %s %s" i var-name var-val)
 
         (setq variables (cons `(,var-name . ,var-val) variables))))
     variables))
@@ -494,9 +529,10 @@
 (defun mk-output (iter)
   (let ((output-count (bindat-get-field (iter-next iter) :integer-data))
         (outputs))
-    (message "output-count: %s %s" output-count (type-of output-count))
+    ;(message "output-count: %s %s" output-count (type-of output-count))
     (dotimes (i output-count)
-      (let ((output (bindat-get-field (iter-next iter) :string-data)))
+      (let* ((data (iter-next iter))
+             (output (bindat-get-field data :items 0 :string-data)))
         (setq outputs (cons output outputs))))
     `(command "output" outputs, outputs)))
 
@@ -532,61 +568,90 @@
           (set-marker gdscript-debugger--thread-position start-posn (current-buffer))
           (goto-char gdscript-debugger--thread-position))))))
 
+(defmacro gdscript-debugger--command-handler (&rest body)
+  `(progn
+     ,@body
+     (setq gdscript-debugger--previous-packet-data
+           (substring gdscript-debugger--previous-packet-data gdscript-debugger--offset (length gdscript-debugger--previous-packet-data)))
+     (setq gdscript-debugger--offset 0)))
+
 (defun gdscript-debugger--handle-server-reply (process content)
   "Gets invoked whenever the server sends data to the client."
   ;;(message "(DATA received): %s" (length content))
   ;;(message "(Old DATA): %s" (length gdscript-debugger--previous-packet-data))
-
-  (condition-case x
-      (let ((iter (command-iter content)))
-        (while t
-          (pcase (bindat-get-field (iter-next iter) :string-data)
-            ("debug_enter"
-             (message "Received 'debug_enter' command")
-             (let ((cmd (mk-debug-enter iter)))
-               (pcase (debug-enter->reason cmd)
-                 ("Breakpoint" (gdscript-debugger-get-stack-dump))
-                 (_ (message "Unknown reason %s" cmd)))))
-            ("debug_exit" (let ((cmd (mk-debug-exit iter)))
-                            (message "Debug_exit: %s " cmd)))
-            ("output" (let ((cmd (mk-output iter)))
-                        (message "Output: %s" (plist-get cmd 'outputs))
-                        ;; (dolist (element (plist-get cmd 'outputs))
-                        ;;   (message "output: %s" element))
-                        ))
-            ("error" (let ((cmd (mk-error iter)))
-                       (message "Error: %s" cmd)))
-            ("performance" (let ((cmd (mk-performance iter)))
-                             ;; (message "Performace: %s" cmd)
-                             ))
-            ("stack_dump"
-             (message "Received 'stack_dump' command")
-             (let ((cmd (mk-stack-dump iter)))
-               (gdscript-debugger--on-stack-dump cmd (process-get process 'project))))
-            ("message:inspect_object"
-             (message "Received 'message:inspect_object' command")
-             (let ((cmd (mk-inspect-object iter)))
-               (message "message:inspect_object: %s" cmd)))
-            ("stack_frame_vars" (let ((cmd (mk-stack-frame-vars iter)))
-                                  (with-current-buffer (gdscript-debugger--get-locals-buffer)
-                                    (let ((inhibit-read-only t))
-                                      (erase-buffer)
-                                      (insert "Locals:\n")
-                                      (dolist (local (stack-frame-vars->locals cmd))
-                                        (insert (gdscript-debugger--variable-name (car local)))
-                                        (insert (format ": %s\n" (cdr local))))
-                                      (insert "\nMembers:\n")
-                                      (dolist (member (stack-frame-vars->members cmd))
-                                        (insert (gdscript-debugger--variable-name (car member)))
-                                        (insert (format ": %s\n" (cdr member))))
-                                      (insert "\nGlobals:\n")
-                                      (dolist (global (stack-frame-vars->globals cmd))
-                                        (insert (gdscript-debugger--variable-name (car global)))
-                                        (insert (format ": %s\n" (cdr global)))))
-                                    (display-buffer (current-buffer)))
-                                  ;; (message "Stack frame vars %s" cmd)
-                                  )))))
-    (iter-end-of-sequence (message "No more packets to process %s" x))))
+  (setq gdscript-debugger--previous-packet-data (concat gdscript-debugger--previous-packet-data content))
+  (when (or (null gdscript-debugger--data-needed)
+            (<= gdscript-debugger--data-needed (length gdscript-debugger--previous-packet-data)))
+    (condition-case x
+        (let ((iter (command-iter)))
+          (while t
+            (let* ((next-data (iter-next iter))
+                   (str (bindat-get-field next-data :string-data)))
+              (pcase str
+                ("debug_enter"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'debug_enter' command")
+                  (let ((cmd (mk-debug-enter iter)))
+                    (pcase (debug-enter->reason cmd)
+                      ("Breakpoint" (gdscript-debugger-get-stack-dump))
+                      (_ (error "Unknown reason %s" cmd))))))
+                ("debug_exit"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'debug_exit' command")
+                  (let ((cmd (mk-debug-exit iter)))
+                    (message "Debug_exit: %s " cmd))))
+                ("output"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'output' command")
+                  (let ((cmd (mk-output iter)))
+                    ;;(message "Output: %s" (plist-get cmd 'outputs))
+                    ;; (dolist (element (plist-get cmd 'outputs))
+                    ;;   (message "output: %s" element))
+                    )))
+                ("error"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'error' command")
+                  (let ((cmd (mk-error iter)))
+                    ;;(message "Error: %s" cmd)
+                    )))
+                ("performance"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'performance' command")
+                  (let ((cmd (mk-performance iter)))
+                    ;; (message "Performace: %s" cmd)
+                    )))
+                ("stack_dump"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'stack_dump' command")
+                  (let ((cmd (mk-stack-dump iter)))
+                    (message "[stack_dump] cmd: %s" cmd)
+                    (gdscript-debugger--on-stack-dump cmd (process-get process 'project))
+                    (gdscript-debugger-get-stack-frame-vars))))
+                ("stack_frame_vars"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'stack_frame_vars' command")
+                  (let ((cmd (mk-stack-frame-vars iter)))
+                    (with-current-buffer (gdscript-debugger--get-locals-buffer)
+                      (let ((inhibit-read-only t))
+                        (erase-buffer)
+                        (insert "Locals:\n")
+                        (dolist (local (stack-frame-vars->locals cmd))
+                          (insert (gdscript-debugger--variable-name (car local)))
+                          (insert (format ": %s\n" (cdr local))))
+                        (insert "\nMembers:\n")
+                        (dolist (member (stack-frame-vars->members cmd))
+                          (insert (gdscript-debugger--variable-name (car member)))
+                          (insert (format ": %s\n" (cdr member))))
+                        (insert "\nGlobals:\n")
+                        (dolist (global (stack-frame-vars->globals cmd))
+                          (insert (gdscript-debugger--variable-name (car global)))
+                          (insert (format ": %s\n" (cdr global)))))
+                      (display-buffer (current-buffer)))
+                    ;; (message "Stack frame vars %s" cmd)
+                    )))
+                (_ (error "Unknown command %s data %s" str next-data))))))
+      ;;(iter-end-of-sequence (message "No more packets to process %s" x))
+      (iter-end-of-sequence nil))))
 
 (defun gdscript-debugger--variable-name (var-name)
   (propertize (format "%25s" var-name) 'font-lock-face font-lock-variable-name-face))
@@ -605,8 +670,11 @@
      (string= event "connection broken by remote peer\n")
      (string= event "deleted\n"))
     (message "Resetting server to accept data.")
-    (setq gdscript-debugger--previous-packet-data nil)
-    (setq server-clients '()))
+    (set-marker gdscript-debugger--thread-position nil)
+    (setq gdscript-debugger--previous-packet-data nil
+          gdscript-debugger--offset 0
+          gdscript-debugger--data-needed nil
+          server-clients '()))
    ((eq (process-status process) 'closed)
     (message "EHHHH ???"))))
 
@@ -926,6 +994,11 @@ BUFFER nil or omitted means use the current buffer."
                     (:conc-name aabb->))
   x-coordinate y-coordinate z-coordinate x-size y-size z-size)
 
+(cl-defstruct (basis (:constructor basis-create)
+                     (:copier nil)
+                     (:conc-name basis->))
+  x y z)
+
 (cl-defstruct (color (:constructor color-create)
                          (:copier nil)
                          (:conc-name color->))
@@ -958,6 +1031,11 @@ BUFFER nil or omitted means use the current buffer."
                        (:copier nil)
                        (:conc-name vector3->))
   x y z)
+
+(cl-defstruct (transform2d (:constructor transform2d-create)
+                           (:copier nil)
+                           (:conc-name transform2d->))
+  x y origin)
 
 (cl-defstruct (prim-array (:constructor prim-array-create)
                           (:copier nil)
@@ -1105,7 +1183,6 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
           (let ((mode (gdscript-debugger--rules-buffer-mode rules)))
             (when mode (funcall mode))
             (setq gdscript-debugger--buffer-type buffer-type)
-            ;;(setq mode-name "Locals: ")
             (rename-buffer (funcall (gdscript-debugger--rules-name-maker rules)))
             (current-buffer))))))
 
@@ -1149,4 +1226,3 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
  'gdscript-debugger--breakpoints-mode)
 
 (provide 'gdscript-debugger)
-
