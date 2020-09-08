@@ -655,7 +655,7 @@
                         (insert "Locals:\n")
                         (dolist (local (stack-frame-vars->locals cmd))
                           (insert (gdscript-debugger--variable-name (car local)))
-                          (insert (format ": %s\n" (cdr local))))
+                          (insert (format ": %s\n" (gdscript-debugger--stringify (cdr local)))))
                         (insert "\nMembers:\n")
                         (dolist (member (stack-frame-vars->members cmd))
                           (insert (gdscript-debugger--variable-name (car member)))
@@ -667,9 +667,20 @@
                       (display-buffer (current-buffer)))
                     ;; (message "Stack frame vars %s" cmd)
                     )))
+                ("message:inspect_object"
+                 (gdscript-debugger--command-handler
+                  (message "Received 'message:inspect_object' command")
+                  (let ((cmd (mk-inspect-object iter)))
+                    (gdscript-debugger--refresh-inspector-buffer cmd))))
                 (_ (error "Unknown command %s data %s" str next-data))))))
       ;;(iter-end-of-sequence (message "No more packets to process %s" x))
       (iter-end-of-sequence nil))))
+
+(defun gdscript-debugger--stringify (object)
+  (cond ((object-id-p object)
+         (let ((object-id (object-id->value object)))
+           (propertize (format "Object ID: %s" (number-to-string object-id)) 'object-id object-id)))
+        (t object)))
 
 (defun gdscript-debugger--variable-name (var-name)
   (propertize (format "%25s" var-name) 'font-lock-face font-lock-variable-name-face))
@@ -708,10 +719,9 @@
 
 ;;(print (macroexpand '(gdscript-debugger--send-command server-process (message "HIII %s" server-process))))
 
-(defun gdscript-debugger-inspect-object()
-  (interactive)
+(defun gdscript-debugger-inspect-object(object-id)
   (gdscript-debugger--send-command
-    (gdscript-debugger--inspect-object (object-id-create :value 1278))))
+    (gdscript-debugger--inspect-object object-id)))
 
 (defun gdscript-debugger-get-stack-dump()
   (interactive)
@@ -821,7 +831,7 @@
        (:command-length . ,command-length)
        (:command . ,command)
        (:object-id-type . ,variant-integer)
-       (:object-id . ,(object-id->value object-id))))))
+       (:object-id . ,object-id)))))
 
 (defun gdscript-debugger--get-stack-frame-vars (frame)
   (let* ((command "get_stack_frame_vars")
@@ -1144,6 +1154,20 @@ BUFFER nil or omitted means use the current buffer."
                   (set-window-point window (point))))))
         (error "Not recognized as break/watchpoint line")))))
 
+(defun gdscript-debugger-inspect-object-id ()
+  (interactive)
+  (save-excursion
+    (let ((object-id (get-text-property (point) 'object-id)))
+      (if object-id
+          (progn
+            (gdscript-debugger-inspect-object object-id)
+            (save-selected-window
+              (let* ((buffer (gdscript-debugger--get-buffer-create 'inspector-buffer))
+                     (window (display-buffer buffer)))
+                (with-current-buffer buffer
+                  (set-window-point window (point))))))
+        (error "Not recognized as object-id line")))))
+
 (defun gdscript-debugger-show-stack-frame-vars ()
   (interactive)
   (save-excursion
@@ -1173,6 +1197,7 @@ BUFFER nil or omitted means use the current buffer."
   (let ((map (make-sparse-keymap)))
     (suppress-keymap map)
     (define-key map "q" 'kill-current-buffer)
+    (define-key map "\r" 'gdscript-debugger-inspect-object-id)
     map))
 
 (defvar-local gdscript-debugger--buffer-type nil
@@ -1206,6 +1231,11 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
   (interactive)
   (display-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)))
 
+(defun gdscript-debugger-display-inspector-buffer ()
+  "Display the inspector."
+  (interactive)
+  (display-buffer (gdscript-debugger--get-buffer-create 'inspector-buffer)))
+
 (defun gdscript-debugger--remove-breakpoint-from-buffer (breakpoint)
   (setq gdscript-debugger--breakpoints (remove breakpoint gdscript-debugger--breakpoints))
   (refresh-breakpoints-buffer))
@@ -1234,6 +1264,14 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
                     (propertize
                      (format "%s\n" (stack-dump->function-name stack)) 'font-lock-face font-lock-function-name-face))
                    'gdscript-debugger--stack-dump stack)))))))
+
+(defun gdscript-debugger--refresh-inspector-buffer (inspect-object)
+  (with-current-buffer (gdscript-debugger--get-buffer-create 'inspector-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "%s %s\n" (inspect-object->object-id inspect-object) (inspect-object->class inspect-object)))
+      (dolist (property (inspect-object->properties inspect-object))
+        (insert (format "%s\n" property))))))
 
 (defun refresh-breakpoints-buffer ()
  (with-current-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)
@@ -1265,6 +1303,10 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
   "Major mode for breakpoints management."
   (setq header-line-format "Breakpoints"))
 
+(define-derived-mode gdscript-debugger--inspector-mode gdscript-debugger--parent-mode "Inspector"
+  "Major mode for inspector management."
+  (setq header-line-format "Inspector"))
+
 (defun gdscript-debugger--stack-dump-buffer-name ()
   (concat "* Stack dump *"))
 
@@ -1273,6 +1315,9 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
 
 (defun gdscript-debugger--breakpoints-buffer-name ()
   (concat "* Breakpoints *"))
+
+(defun gdscript-debugger--inspector-buffer-name ()
+  (concat "* Inspector *"))
 
 (defvar gdscript-debugger--buffer-rules '())
 (defvar gdscript-debugger--breakpoints '())
@@ -1304,9 +1349,15 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
  'gdscript-debugger--breakpoints-buffer-name
  'gdscript-debugger--breakpoints-mode)
 
+(gdscript-debugger--set-buffer-rules
+ 'inspector-buffer
+ 'gdscript-debugger--inspector-buffer-name
+ 'gdscript-debugger--inspector-mode)
+
 (define-key gdscript-mode-map (kbd "C-c C-d C-d s") 'gdscript-debugger-display-stack-frame-vars-buffer)
 (define-key gdscript-mode-map (kbd "C-c C-d C-d d") 'gdscript-debugger-display-stack-dump-buffer)
 (define-key gdscript-mode-map (kbd "C-c C-d C-d b") 'gdscript-debugger-display-breakpoint-buffer)
+(define-key gdscript-mode-map (kbd "C-c C-d C-d i") 'gdscript-debugger-display-inspector-buffer)
 (define-key gdscript-mode-map (kbd "C-c C-d b") 'gdscript-debugger-add-breakpoint)
 (define-key gdscript-mode-map (kbd "C-c C-d r") 'gdscript-debugger-remove-breakpoint)
 (define-key gdscript-mode-map (kbd "C-c C-d q") 'gdscript-debugger-make-server)
