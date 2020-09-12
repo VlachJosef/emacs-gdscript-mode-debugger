@@ -45,11 +45,12 @@
                            (ash (logand #x7f b1) 16)
                            (ash b2 8)
                            b3))
-         (result (if (= #xff exp)
-                     (if (= #x800000 mantissa)
-                         1.0e+INF
-                       0.0e+NaN)
-                   (ldexp (ldexp mantissa -24) (- exp 126)))))
+         (result (cond ((= #xff exp)
+                        (if (= #x800000 mantissa)
+                            1.0e+INF
+                          0.0e+NaN))
+                       ((= #x0 exp b1 b2 b3) 0.0)
+                       (t (ldexp (ldexp mantissa -24) (- exp 126))))))
     (if negp
         (- result)
       result)))
@@ -491,10 +492,8 @@
       (let* ((var-name (bindat-get-field (iter-next iter) :string-data))
              (var-value (iter-next iter))
              (var-val (from-variant var-value)))
-        ;;(message "%s) [read-var-names] var-name var-val : %s %s" i var-name var-val)
-
-        (setq variables (cons `(,var-name . ,var-val) variables))))
-    variables))
+        (push `(,var-name . ,var-val) variables)))
+    (reverse variables)))
 
 (defun mk-stack-frame-vars (iter)
   (let* ((total-size (get-integer (iter-next iter)))
@@ -573,9 +572,9 @@
 (defsubst gdscript-debugger--drop-res (file-path)
   (substring file-path (length "res://")))
 
-(defun gdscript-debugger--on-stack-dump (stuck-dump project-root)
-  (let* ((file (stack-dump->file stuck-dump))
-         (line (stack-dump->line stuck-dump))
+(defun gdscript-debugger--on-stack-dump (stack-dump project-root)
+  (let* ((file (stack-dump->file stack-dump))
+         (line (stack-dump->line stack-dump))
          (full-file-path (concat project-root (gdscript-debugger--drop-res file))))
     (if (not project-root)
         (error "Project for file %s not found." file)
@@ -607,19 +606,25 @@
               (pcase str
                 ("debug_enter"
                  (gdscript-debugger--command-handler
-                  (message "Received 'debug_enter' command")
+                  ;;(message "Received 'debug_enter' command")
                   (let ((cmd (mk-debug-enter iter)))
+                    ;;(message "-- cmd: %s" cmd)
                     (pcase (debug-enter->reason cmd)
-                      ("Breakpoint" (gdscript-debugger-get-stack-dump))
-                      (_ (error "Unknown reason %s" cmd))))))
+                      ("Breakpoint"
+                       (gdscript-debugger-get-stack-dump)
+                       (message "Breakpoint encountered."))
+                      (other
+                       (gdscript-debugger-get-stack-dump)
+                       (message "%s" other))))))
                 ("debug_exit"
                  (gdscript-debugger--command-handler
-                  (message "Received 'debug_exit' command")
+                  ;;(message "Received 'debug_exit' command")
                   (let ((cmd (mk-debug-exit iter)))
-                    (message "Debug_exit: %s " cmd))))
+                    ;; (message "Debug_exit: %s " cmd)
+                    )))
                 ("output"
                  (gdscript-debugger--command-handler
-                  (message "Received 'output' command")
+                  ;;(message "Received 'output' command")
                   (let ((cmd (mk-output iter)))
                     ;;(message "Output: %s" (plist-get cmd 'outputs))
                     ;; (dolist (element (plist-get cmd 'outputs))
@@ -627,27 +632,27 @@
                     )))
                 ("error"
                  (gdscript-debugger--command-handler
-                  (message "Received 'error' command")
+                  ;;(message "Received 'error' command")
                   (let ((cmd (mk-error iter)))
                     ;;(message "Error: %s" cmd)
                     )))
                 ("performance"
                  (gdscript-debugger--command-handler
-                  (message "Received 'performance' command")
+                  ;;(message "Received 'performance' command")
                   (let ((cmd (mk-performance iter)))
                     ;; (message "Performace: %s" cmd)
                     )))
                 ("stack_dump"
                  (gdscript-debugger--command-handler
-                  (message "Received 'stack_dump' command")
+                  ;;(message "Received 'stack_dump' command")
                   (let ((cmd (mk-stack-dump iter)))
                     ;;(message "[stack_dump] cmd: %s" cmd)
-                    (gdscript-debugger--refresh-stack-frame-vars-buffer cmd)
+                    (gdscript-debugger--refresh-stack-frame-vars-buffer cmd (process-get process 'project))
                     (gdscript-debugger--on-stack-dump (car cmd) (process-get process 'project))
                     (gdscript-debugger-get-stack-frame-vars (stack-dump->level (car cmd))))))
                 ("stack_frame_vars"
                  (gdscript-debugger--command-handler
-                  (message "Received 'stack_frame_vars' command")
+                  ;;(message "Received 'stack_frame_vars' command")
                   (let ((cmd (mk-stack-frame-vars iter)))
                     (with-current-buffer (gdscript-debugger--get-locals-buffer)
                       (let ((inhibit-read-only t))
@@ -659,17 +664,17 @@
                         (insert "\nMembers:\n")
                         (dolist (member (stack-frame-vars->members cmd))
                           (insert (gdscript-debugger--variable-name (car member)))
-                          (insert (format ": %s\n" (cdr member))))
+                          (insert (format ": %s\n" (gdscript-debugger--stringify (cdr member)))))
                         (insert "\nGlobals:\n")
                         (dolist (global (stack-frame-vars->globals cmd))
                           (insert (gdscript-debugger--variable-name (car global)))
-                          (insert (format ": %s\n" (cdr global)))))
+                          (insert (format ": %s\n" (gdscript-debugger--stringify (cdr global))))))
                       (display-buffer (current-buffer)))
                     ;; (message "Stack frame vars %s" cmd)
                     )))
                 ("message:inspect_object"
                  (gdscript-debugger--command-handler
-                  (message "Received 'message:inspect_object' command")
+                  ;;(message "Received 'message:inspect_object' command")
                   (let ((cmd (mk-inspect-object iter)))
                     (gdscript-debugger--refresh-inspector-buffer cmd))))
                 (_ (error "Unknown command %s data %s" str next-data))))))
@@ -717,6 +722,12 @@
         (process-send-string server-process command)))
      (_ (message "More than one game process running"))))
 
+(defmacro gdscript-debugger--if-server-process (&rest body)
+  "Todo"
+  (declare (indent 0) (debug t))
+  `(pcase server-clients
+     (`(,server-process) (progn ,@body))))
+
 ;;(print (macroexpand '(gdscript-debugger--send-command server-process (message "HIII %s" server-process))))
 
 (defun gdscript-debugger-inspect-object(object-id)
@@ -745,8 +756,6 @@
 
   (setq gdscript-debugger--thread-position (make-marker))
   (add-to-list 'overlay-arrow-variable-list 'gdscript-debugger--thread-position)
-
-  ;;(set-marker gdscript-debugger--thread-position (point) (current-buffer))
 
   (let ((project-root (gdscript-util--find-project-configuration-file)))
     (if (not project-root)
@@ -805,6 +814,16 @@
     (:boolean-type u32r)
     (:boolean u32r)))
 
+(defun gdscript-debugger--set-skip-breakpoints-packet-definition (command-length)
+  `((:packet-length u32r)
+    (:array-type u32r)
+    (:elements-count u32r)
+    (:command-type u32r)
+    (:command-length u32r)
+    (:command str ,command-length)
+    (align 4)
+    (:boolean-type u32r)
+    (:boolean u32r)))
 
 (defconst variant-bool 1 "bool")
 (defconst variant-integer 2 "integer")
@@ -850,7 +869,6 @@
        (:frame . ,frame)))))
 
 (defun gdscript-debugger--breakpoint-command (file line add-or-remove)
-  (message "[ADDING BREAKPOINT] file %s , line: %s" file line)
   (let* ((command "breakpoint")
          (command-length (length command))
          (command-alength (align-length command))
@@ -872,6 +890,22 @@
        (:boolean-type . ,variant-bool)
        (:boolean . ,(boolean-to-integer add-or-remove))))))
 
+(defun gdscript-debugger--set-skip-breakpoints-command (skip)
+  (let* ((command "set_skip_breakpoints")
+         (command-length (length command))
+         (command-alength (align-length command))
+         (packet-length (+ (* 6 4) command-alength))
+         (spec (gdscript-debugger--set-skip-breakpoints-packet-definition command-length)))
+    (bindat-pack spec
+     `((:packet-length . ,packet-length)
+       (:array-type . ,variant-array)
+       (:elements-count . 2)
+       (:command-type . ,variant-string)
+       (:command-length . ,command-length)
+       (:command . ,command)
+       (:boolean-type . ,variant-bool)
+       (:boolean . ,(boolean-to-integer skip))))))
+
 (defun gdscript-debugger--packet-definition (string-length)
   `((:packet-length u32r)
     (:array-type u32r)
@@ -882,11 +916,8 @@
     (align 4)))
 
 (defun gdscript-debugger--command (command)
-  ;;(message "(gdscript-debugger--packet-definition (length command)): %s" (gdscript-debugger--packet-definition (length command)))
   (let* ((command-alength (align-length command))
          (packet-length (+ (* 4 4) command-alength)))
-    ;; (message "packet-length: %s" packet-length)
-    ;; (message "command-alength: %s" command-alength)
     (bindat-pack
      (gdscript-debugger--packet-definition (length command))
      `((:packet-length . ,packet-length)
@@ -909,11 +940,11 @@
 ;;                         s " ")
 ;;              (current-time-string)))
 
-(defun gdscript-debugger--add-fringe(pos &rest sprops)
+(defun gdscript-debugger--add-fringe(pos enabled &rest sprops)
   (interactive)
   (let* ((string (make-string 1 ?x))
          (buffer (current-buffer))
-         (prop '(left-fringe breakpoint breakpoint-enabled))
+         (prop `(left-fringe breakpoint ,(if enabled 'breakpoint-enabled 'breakpoint-disabled)))
          (overlay (make-overlay pos pos buffer)))
     (put-text-property 0 1 'display prop string)
     (if sprops
@@ -969,10 +1000,11 @@ BUFFER nil or omitted means use the current buffer."
            (breakpoint (breakpoint-create :file file :file-absolute file-absolute :line line)))
       (if (not (member breakpoint gdscript-debugger--breakpoints))
           (message "No breakpoint at %s:%s" file line)
-        (gdscript-debugger--send-command
-          (gdscript-debugger--remove-strings start end)
-          (gdscript-debugger--remove-breakpoint-from-buffer breakpoint)
-          (gdscript-debugger--breakpoint-command file line nil))))))
+        (gdscript-debugger--remove-strings start end)
+        (gdscript-debugger--remove-breakpoint-from-buffer breakpoint)
+        (gdscript-debugger--if-server-process
+          (gdscript-debugger--send-command
+            (gdscript-debugger--breakpoint-command file line nil)))))))
 
 (defun gdscript-debugger-add-breakpoint ()
   (interactive)
@@ -983,10 +1015,32 @@ BUFFER nil or omitted means use the current buffer."
            (breakpoint (breakpoint-create :file file :file-absolute file-absolute :line line)))
       (if (member breakpoint gdscript-debugger--breakpoints)
           (message "Breakpoint already present at %s:%s" file line)
-        (gdscript-debugger--send-command
-          (gdscript-debugger--add-fringe (line-beginning-position) 'gdb-bptno 1)
-          (gdscript-debugger--add-breakpoint-to-buffer breakpoint)
-          (gdscript-debugger--breakpoint-command file line t))))))
+        (gdscript-debugger--add-fringe (line-beginning-position) (not gdscript-debugger--skip-breakpoints) 'gdb-bptno 1)
+        (gdscript-debugger--add-breakpoint-to-buffer breakpoint)
+        (refresh-breakpoints-buffer)
+        (gdscript-debugger--if-server-process
+          (gdscript-debugger--send-command
+            (gdscript-debugger--breakpoint-command file line t)))))))
+
+(defun set-left-fringe-breakpoints (enabled)
+  (refresh-breakpoints-buffer)
+  (dolist (breakpoint gdscript-debugger--breakpoints)
+    (let ((file (breakpoint->file-absolute breakpoint))
+          (line (breakpoint->line breakpoint)))
+      (save-selected-window
+        (let ((buffer (find-file-noselect file)))
+          (save-excursion
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (forward-line (1- line))
+              (let ((start (line-beginning-position))
+                    (end (line-end-position)))
+                (dolist (overlay (overlays-in start end))
+                  (when (overlay-get overlay 'put-break)
+                    (let* ((string (overlay-get overlay 'before-string))
+                           (display-property (get-text-property 0 'display string))
+                           (prop `(left-fringe breakpoint ,(if (not enabled) 'breakpoint-enabled 'breakpoint-disabled))))
+                      (put-text-property 0 1 'display prop string))))))))))))
 
 (defun gdscript-debugger-get-stack-frame-vars (level)
   (gdscript-debugger--send-command
@@ -1129,30 +1183,53 @@ BUFFER nil or omitted means use the current buffer."
   (setq buffer-read-only t)
   (buffer-disable-undo))
 
+(defun gdscript-debugger-enable-breakpoints ()
+  (interactive)
+  (set-left-fringe-breakpoints nil)
+  (gdscript-debugger--send-command
+    (gdscript-debugger--set-skip-breakpoints-command nil)))
+
+(defun gdscript-debugger-skip-breakpoints ()
+  (interactive)
+  (set-left-fringe-breakpoints t)
+  (gdscript-debugger--send-command
+    (gdscript-debugger--set-skip-breakpoints-command t)))
+
 (defun gdscript-debugger-toggle-breakpoint ()
   (interactive)
-  (message "TODO [gdscript-debugger-toggle-breakpoint]"))
+  (setq gdscript-debugger--skip-breakpoints (not gdscript-debugger--skip-breakpoints))
+  (set-left-fringe-breakpoints gdscript-debugger--skip-breakpoints)
+  (gdscript-debugger--send-command
+    (gdscript-debugger--set-skip-breakpoints-command gdscript-debugger--skip-breakpoints)))
 
 (defun gdscript-debugger-delete-breakpoint ()
   (interactive)
-  (message "TODO [gdscript-debugger-delete-breakpoint]"))
+  (let ((breakpoint (get-text-property (point) 'gdscript-debugger--breakpoint)))
+    (if breakpoint
+        (let ((file (breakpoint->file-absolute breakpoint))
+              (line (breakpoint->line breakpoint)))
+          (save-selected-window
+            (let ((buffer (find-file-noselect file)))
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (forward-line (1- line))
+                (gdscript-debugger-remove-breakpoint)))))
+      (error "Not recognized as breakpoint line"))))
 
 (defun gdscript-debugger-goto-breakpoint ()
   (interactive)
-  (save-excursion
-    (beginning-of-line)
-    (let ((breakpoint (get-text-property (point) 'gdscript-debugger--breakpoint)))
-      (if breakpoint
-          (let ((file (breakpoint->file-absolute breakpoint))
-                (line (breakpoint->line breakpoint)))
-            (save-selected-window
-              (let* ((buffer (find-file-noselect file))
-                     (window (display-buffer buffer)))
-                (with-current-buffer buffer
-                  (goto-char (point-min))
-                  (forward-line (1- line))
-                  (set-window-point window (point))))))
-        (error "Not recognized as break/watchpoint line")))))
+  (let ((breakpoint (get-text-property (point) 'gdscript-debugger--breakpoint)))
+    (if breakpoint
+        (let ((file (breakpoint->file-absolute breakpoint))
+              (line (breakpoint->line breakpoint)))
+          (save-selected-window
+            (let* ((buffer (find-file-noselect file))
+                   (window (display-buffer buffer)))
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (forward-line (1- line))
+                (set-window-point window (point))))))
+      (error "Not recognized as breakpoint line"))))
 
 (defun gdscript-debugger-inspect-object-id ()
   (interactive)
@@ -1177,11 +1254,30 @@ BUFFER nil or omitted means use the current buffer."
           (gdscript-debugger-get-stack-frame-vars (stack-dump->level stack))
         (error "Not recognized as stack-frame line")))))
 
+(defun gdscript-debugger-jump-to-stack-point ()
+  (interactive)
+  (save-excursion
+    (beginning-of-line)
+    (let ((stack-dump (get-text-property (point) 'gdscript-debugger--stack-dump))
+          (project-root (get-text-property (point) 'gdscript-debugger--project-root)))
+      (if stack-dump
+          (let* ((file (stack-dump->file stack-dump))
+                 (line (stack-dump->line stack-dump))
+                 (full-file-path (concat project-root (gdscript-debugger--drop-res file))))
+            (if (not project-root)
+                (error "Project for file %s not found." file)
+              (with-current-buffer (find-file full-file-path)
+                (let* ((posns (line-posns line))
+                       (start-posn (car posns)))
+                  (goto-char start-posn)))))
+        (error "Not recognized as stack-frame line")))))
+
 (defvar gdscript-debugger--stack-dump-mode-map
   (let ((map (make-sparse-keymap)))
     (suppress-keymap map)
     (define-key map "q" 'kill-current-buffer)
     (define-key map "\r" 'gdscript-debugger-show-stack-frame-vars)
+    (define-key map " " 'gdscript-debugger-jump-to-stack-point)
     map))
 
 (defvar gdscript-debugger--breakpoints-mode-map
@@ -1242,10 +1338,9 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
 
 (defun gdscript-debugger--add-breakpoint-to-buffer (breakpoint)
   (unless (member breakpoint gdscript-debugger--breakpoints)
-    (push breakpoint gdscript-debugger--breakpoints)
-    (refresh-breakpoints-buffer)))
+    (push breakpoint gdscript-debugger--breakpoints)))
 
-(defun gdscript-debugger--refresh-stack-frame-vars-buffer (stack-dump)
+(defun gdscript-debugger--refresh-stack-frame-vars-buffer (stack-dump project-root)
   (with-current-buffer (gdscript-debugger--get-buffer-create 'stack-dump-buffer)
     (let ((inhibit-read-only t)
           (longest-file-name 0))
@@ -1263,7 +1358,8 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
                     (format (concat "%s - %-" (number-to-string (1+ longest-file-name)) "s - ") (stack-dump->level stack) ident)
                     (propertize
                      (format "%s\n" (stack-dump->function-name stack)) 'font-lock-face font-lock-function-name-face))
-                   'gdscript-debugger--stack-dump stack)))))))
+                   'gdscript-debugger--stack-dump stack
+                   'gdscript-debugger--project-root project-root)))))))
 
 (defun gdscript-debugger--refresh-inspector-buffer (inspect-object)
   (with-current-buffer (gdscript-debugger--get-buffer-create 'inspector-buffer)
@@ -1274,11 +1370,26 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
         (insert (format "%s\n" property))))))
 
 (defun refresh-breakpoints-buffer ()
- (with-current-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)
-   (let ((inhibit-read-only t))
-     (erase-buffer)
-     (dolist (breakpoint gdscript-debugger--breakpoints)
-       (insert (concat (propertize (format "%s:%s" (breakpoint->file breakpoint) (breakpoint->line breakpoint)) 'gdscript-debugger--breakpoint breakpoint) "\n"))))))
+  (with-current-buffer (gdscript-debugger--get-buffer-create 'breakpoints-buffer)
+    (let* ((inhibit-read-only t)
+           (window (get-buffer-window (current-buffer) 0))
+           (start (window-start window))
+           (p (window-point window)))
+      (erase-buffer)
+      (insert "Enb Location\n")
+      (dolist (breakpoint gdscript-debugger--breakpoints)
+        (let ((indicator (if (not gdscript-debugger--skip-breakpoints)
+                             (propertize (format "%-4s" "y") 'font-lock-face
+                                         font-lock-warning-face)
+                           (propertize (format "%-4s" "n") 'font-lock-face
+                                       font-lock-comment-face))))
+          (insert (propertize (format "%s%s:%s\n"
+                                      indicator
+                                      (breakpoint->file breakpoint)
+                                      (breakpoint->line breakpoint))
+                              'gdscript-debugger--breakpoint breakpoint))))
+      (set-window-start window start) ;; Forces fringe icons to refresh
+      (set-window-point window p))))
 
 (defun gdscript-debugger--get-buffer-create (buffer-type)
   (or (gdscript-debugger--get-buffer buffer-type)
@@ -1321,6 +1432,7 @@ In that buffer, `gdscript-debugger--buffer-type' must be equal to BUFFER-TYPE."
 
 (defvar gdscript-debugger--buffer-rules '())
 (defvar gdscript-debugger--breakpoints '())
+(defvar gdscript-debugger--skip-breakpoints nil)
 
 (defun gdscript-debugger--rules-name-maker (rules-entry)
   (cadr rules-entry))
